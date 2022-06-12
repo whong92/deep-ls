@@ -8,8 +8,8 @@ import torch
 from collections import OrderedDict
 from typing import Optional, Any
 
-from tests.test_env import _make_random_move
 from deepls.gcn_model import model_input_from_states
+from deepls.TSP2OptEnv import TSP2OptState
 
 
 class BaseAgent:
@@ -314,6 +314,17 @@ class REINFORCEAgent(BaseAgent):
                 # self.replay_buffer.flush()
 
 
+def _make_random_move(state: TSP2OptState):
+    i, j = np.where(state.tour_adj)
+    u = i[i < j]
+    v = j[i < j]
+    es = np.stack([u, v])
+    e1, e2 = np.random.choice(es.shape[1], 2)
+    e1 = es[:, e1]
+    e2 = es[:, e2]
+    return e1, e2
+
+
 class RandomActionREINFORCEAgent(REINFORCEAgent):
 
     def policy(self, state):
@@ -391,6 +402,8 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
             betas=(optimizer_config['beta_m'], optimizer_config['beta_v']),
             eps=optimizer_config['epsilon']
         )
+        self.dont_optimize_policy_steps = model_config.get('dont_optimize_policy_steps', 0)
+
         self.critic_loss = torch.nn.HuberLoss(delta=0.2).to(self.device)
         # torch.nn.SmoothL1Loss().to(self.device)
         # torch.nn.MSELoss().to(self.device)
@@ -457,7 +470,8 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
         """
         run this with provided experiences to run one step of optimization
         """
-        optimize_policy = self.episode % self.policy_optimize_every == 0
+        optimize_policy = (self.episode % self.policy_optimize_every == 0) \
+                          and (self.episode > self.dont_optimize_policy_steps)
         optimize_critic = self.episode % self.critic_optimize_every == 0
         if optimize_policy or optimize_critic:
             returns = torch.as_tensor([e['cache']['return'] for e in experiences])

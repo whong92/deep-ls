@@ -4,7 +4,6 @@ import torch
 from torch import nn
 from deepls.gcn_layers import ResidualGatedGCNLayer, MLP
 from torch.distributions import categorical as tdc
-from deepls.TSP2OptEnv import TSP2OptState
 import copy
 
 

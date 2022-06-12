@@ -147,6 +147,7 @@ class TSP2OptEnv(Env):
         max_num_steps=50,
         shuffle_data=True,
         ret_best_state=True,
+        ret_log_tour_len=False,
         seed=42
     ):
         super(TSP2OptEnv, self).__init__()
@@ -157,6 +158,7 @@ class TSP2OptEnv(Env):
         self.shuffle_data = shuffle_data
         self.seed = seed
         self.ret_best_state = ret_best_state
+        self.ret_log_tour_len = ret_log_tour_len
         self.init()
 
     def init(self):
@@ -207,7 +209,10 @@ class TSP2OptEnv(Env):
             # TODO: make a terminal state??
             # if the action given in t-1 was terminate, or cur_step == T
             # then the reward is cost(S[t-1])
-            reward = -self.best_state.tour_len
+            if self.ret_log_tour_len:
+                reward = -np.log(self.best_state.tour_len)
+            else:
+                reward = -self.best_state.tour_len
         else:
             e0, e1 = action['e0'], action['e1']
             self.state.apply_move(e0, e1)
