@@ -344,7 +344,7 @@ class RandomActionREINFORCEAgent(REINFORCEAgent):
 
 
 from torch.optim import Adam
-from deepls.gcn_model import TSPRGCNValueNet, TSPRGCNActionNet
+from deepls.gcn_model import TSPRGCNValueNet, TSPRGCNActionNet, TSPRGCNLogNormalValueNet
 from deepls.graph_utils import tour_nodes_to_W
 
 class GRCNCriticBaselineAgent(REINFORCEAgent):
@@ -395,7 +395,15 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
             eps=optimizer_config['epsilon']
         )
 
-        self.critic_baseline = TSPRGCNValueNet(agent_config['model']).to(self.device)
+        self.value_net_type = agent_config['model'].get('value_net_type', 'normal')
+        if self.value_net_type == 'normal':
+            self.critic_baseline = TSPRGCNValueNet(agent_config['model']).to(self.device)
+            self.critic_loss = torch.nn.HuberLoss(delta=0.2).to(self.device)
+        elif self.value_net_type == 'lognormal':
+            self.critic_baseline = TSPRGCNLogNormalValueNet(agent_config['model']).to(self.device)
+        else:
+            raise ValueError(f"value_net_type not recognized: {self.value_net_type}")
+
         self.critic_optimizer = Adam(
             self.critic_baseline.parameters(),
             lr=optimizer_config['step_size_critic'],
@@ -403,10 +411,6 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
             eps=optimizer_config['epsilon']
         )
         self.dont_optimize_policy_steps = model_config.get('dont_optimize_policy_steps', 0)
-
-        self.critic_loss = torch.nn.HuberLoss(delta=0.2).to(self.device)
-        # torch.nn.SmoothL1Loss().to(self.device)
-        # torch.nn.MSELoss().to(self.device)
         self.critic_loss_val = None
         self.critic_abs_err = None
 
@@ -475,7 +479,11 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
         optimize_critic = self.episode % self.critic_optimize_every == 0
         if optimize_policy or optimize_critic:
             returns = torch.as_tensor([e['cache']['return'] for e in experiences])
-            baseline = self.compute_baseline(experiences)
+            if self.value_net_type == 'normal':
+                baseline = self.compute_baseline(experiences)
+            elif self.value_net_type == 'lognormal':
+                baseline_dist: torch.distributions.LogNormal = self.compute_baseline(experiences)
+                baseline = -baseline_dist.mean
 
         if optimize_policy:
             h_sa = self.get_action_pref(experiences)
@@ -488,11 +496,14 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
 
         if optimize_critic:
             _returns = returns.clone().to(self.device)
-            critic_loss = self.critic_loss(baseline, _returns)
+            if self.value_net_type == 'normal':
+                critic_loss = self.critic_loss(baseline, _returns)
+            elif self.value_net_type == 'lognormal':
+                critic_loss = -baseline_dist.log_prob(-_returns).mean()
             self.critic_loss_val = critic_loss.detach().to('cpu')
             critic_loss.backward()
             self.critic_optimizer.step()
-            self.critic_abs_err = torch.abs(baseline - _returns).detach().to('cpu')
+            self.critic_abs_err = torch.abs(baseline - _returns).mean().detach().to('cpu')
 
 
 class GRCNRollingBaselineAgent(REINFORCEAgent):

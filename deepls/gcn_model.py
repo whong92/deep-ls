@@ -300,6 +300,33 @@ class TSPRGCNValueNet(nn.Module):
         return value
 
 
+class TSPRGCNLogNormalValueNet(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        config = copy.deepcopy(config)
+        config['num_edge_cat_features'] = 2
+        self.rgcn = ResidualGatedGCNModel(config)
+        self.hidden_dim = config['hidden_dim']
+        self.value_net = torch.nn.Sequential(
+            MLP(self.hidden_dim, self.hidden_dim, output_dim=2),
+        )  # mu and sigma
+
+    def forward(self, x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour):
+        """
+        x_edges: b x v x v
+        x_edges_values: b x v x v
+        x_nodes_coord: b x v x 2
+        x_tour: b x v x v
+        """
+        x_cat = torch.stack([x_tour, x_best_tour], dim=3)
+        x_emb, e_emb = self.rgcn(x_cat, x_edges_values, x_nodes_coord)
+        x_emb = self.value_net(x_emb) # b x v x 2
+        x_emb_mean = torch.mean(x_emb, dim=1) # b x 2
+        mu, sigma = x_emb_mean[:, 0], torch.exp(x_emb_mean[:, 1])
+        value_dist = torch.distributions.LogNormal(loc=mu, scale=sigma)
+        return value_dist
+
+
 class TSPRGCNActionNet(nn.Module):
     def __init__(self, config):
         super().__init__()

@@ -242,7 +242,7 @@ class TSP2OptEnv(Env):
         assert mode in ["human", "rgb_array"], "Invalid mode, must be either \"human\" or \"rgb_array\""
         if mode == "human":
             cv2.imshow("TSP", img)
-            cv2.waitKey(500)
+            cv2.waitKey(200)
 
         elif mode == "rgb_array":
             return img
