@@ -17,7 +17,7 @@ def _make_random_state(N = 50):
 def test_state(N):
     for _ in range(100):
         nodes, rand_tour, edge_weights = _make_random_state(N)
-        state = TSP2OptState(nodes, edge_weights, rand_tour)
+        state = TSP2OptState(nodes, edge_weights, rand_tour, opt_tour_len=0)
         assert is_valid_tour(state.tour_nodes, state.num_nodes)
 
         # choose 2 random edges

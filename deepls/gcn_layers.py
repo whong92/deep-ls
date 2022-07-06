@@ -76,9 +76,9 @@ class NodeFeatures(nn.Module):
         Vx = self.V(x)  # B x V x H
         Vx = Vx.unsqueeze(1)  # extend Vx from "B x V x H" to "B x 1 x V x H"
         gateVx = edge_gate * Vx  # B x V x V x H
-        if self.aggregation=="mean":
+        if self.aggregation == "mean":
             x_new = Ux + torch.sum(gateVx, dim=2) / (1e-20 + torch.sum(edge_gate, dim=2))  # B x V x H
-        elif self.aggregation=="sum":
+        elif self.aggregation == "sum":
             x_new = Ux + torch.sum(gateVx, dim=2)  # B x V x H
         return x_new
 

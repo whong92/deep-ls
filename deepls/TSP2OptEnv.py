@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 import copy
+from abc import ABC
 
 from gym import Env
 
@@ -58,7 +59,6 @@ def perform_swap(tour_nodes: np.array, i, k, adj):
     # the segment u -> y
     segment = tour_nodes[i:k + 2]
 
-    # TODO: this is for a directed adj - fix for undirected
     u, v = tour_nodes[i], tour_nodes[(i + 1) % N]
     x, y = tour_nodes[k], tour_nodes[(k + 1) % N]
     # remove old edges
@@ -71,7 +71,6 @@ def perform_swap(tour_nodes: np.array, i, k, adj):
     nodes_to_rev = segment[1:-1]
     tour_nodes[i + 1:k + 1] = nodes_to_rev[::-1]
 
-    # TODO: this is for a directed adj - fix for undirected
     # add new edges
     adj[u, x] = 1
     adj[x, u] = 1
@@ -138,54 +137,61 @@ class TSP2OptState:
         self.tour_nodes = perform_swap(self.tour_nodes, pos_i, pos_k, self.tour_adj)
         self.nodes_pos = tour_nodes_to_node_rep(self.tour_nodes)
 
+    def render(self, mode="human"):
+        f = plt.figure(figsize=(8, 8))
+        a = f.add_subplot(111)
+        plot_utils.plot_tsp(
+            a,
+            self.nodes_coord,
+            np.ones(shape=(self.num_nodes, self.num_nodes)),
+            self.edge_weights,
+            self.tour_adj,
+            title=f'tour length = {self.tour_len:.3f}, opt gap = {self.tour_len / self.opt_tour_len - 1.:.3f}'
+        )
+        f.canvas.draw()
+        img = np.frombuffer(f.canvas.tostring_rgb(), dtype=np.uint8)
+        img = img.reshape(f.canvas.get_width_height()[::-1] + (3,))
+        plt.close(f)
+        # img is rgb, convert to opencv's default bgr
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-class TSP2OptEnv(Env):
+        assert mode in ["human", "rgb_array"], "Invalid mode, must be either \"human\" or \"rgb_array\""
+        if mode == "human":
+            cv2.imshow("TSP", img)
+            cv2.waitKey(200)
+
+        elif mode == "rgb_array":
+            return img
+
+    def close(self):
+        cv2.destroyAllWindows()
+
+
+class TSP2OptEnvBase(Env):
+    """
+    Base env class implementing all the 2 opt logic
+    """
     def __init__(
         self,
-        num_nodes=10,
-        data_f='../graph-convnet-tsp/data/tsp10_val_concorde.txt',
         max_num_steps=50,
-        shuffle_data=True,
         ret_best_state=True,
-        ret_log_tour_len=False,
-        seed=42
+        ret_log_tour_len=False
     ):
-        super(TSP2OptEnv, self).__init__()
+        super(TSP2OptEnvBase, self).__init__()
         # config vars
         self.max_num_steps = max_num_steps
-        self.num_nodes = num_nodes
-        self.data_f = data_f
-        self.shuffle_data = shuffle_data
-        self.seed = seed
         self.ret_best_state = ret_best_state
         self.ret_log_tour_len = ret_log_tour_len
-        self.init()
 
     def init(self):
-        self.reader = GoogleTSPReader(self.num_nodes, -1, 1, self.data_f, shuffle_data=self.shuffle_data)
-        self.reader_iter = self.reader.__iter__()
         self.cur_step = -1
 
-        self.cur_instance = None
-        self.tour_nodes = None
-        self.rng = np.random.default_rng(self.seed)
-
-    def reset(self, fetch_next=True):
-        if fetch_next or self.cur_instance is None:
-            # get a new batch from TSPReader and initialize the state
-            try:
-                self.cur_instance = next(self.reader_iter)
-            except StopIteration as e:
-                self.reader_iter = self.reader.__iter__()
-                self.cur_instance = next(self.reader_iter)
-
-        b = self.cur_instance
-        tour_nodes = np.arange(len(b['nodes_coord'][0]), dtype=int)  # greedy_search(b['nodes_coord'][0])
-        self.state = TSP2OptState(b['nodes_coord'][0], b['edges_values'][0], tour_nodes, opt_tour_len=b['tour_len'][0])
+    def _set_instance_to_state(self, instance, init_tour):
+        b = instance
+        self.state = TSP2OptState(b['nodes_coord'][0], b['edges_values'][0], init_tour, opt_tour_len=b['tour_len'][0])
         self.best_state = copy.deepcopy(self.state)
         self.cur_step = 0
         self.done = False
-
 
     def get_state(self):
         if self.ret_best_state:
@@ -222,30 +228,139 @@ class TSP2OptEnv(Env):
 
         return self.get_state(), reward, self.done
 
-    def render(self, mode="human"):
-        f = plt.figure(figsize=(8, 8))
-        a = f.add_subplot(111)
-        plot_utils.plot_tsp(
-            a,
-            self.state.nodes_coord,
-            np.ones(shape=(self.state.num_nodes, self.state.num_nodes)),
-            self.state.edge_weights,
-            self.state.tour_adj,
-            title=f'tour length = {self.state.tour_len:.3f}, opt gap = {self.state.tour_len / self.state.opt_tour_len - 1.:.3f}'
+
+class TSP2OptEnv(TSP2OptEnvBase):
+    """
+    TSP2OptEnvBase but with utilities to read in the data file, and some additional
+    bells and whistles to modify the way we produce samples
+    """
+    def __init__(
+        self,
+        num_nodes=10,
+        data_f='../graph-convnet-tsp/data/tsp10_val_concorde.txt',
+        max_num_steps=50,
+        shuffle_data=True,
+        ret_best_state=True,
+        ret_log_tour_len=False,
+        seed=42
+    ):
+        super().__init__(
+            max_num_steps=max_num_steps,
+            ret_best_state=ret_best_state,
+            ret_log_tour_len=ret_log_tour_len
         )
-        f.canvas.draw()
-        img = np.frombuffer(f.canvas.tostring_rgb(), dtype=np.uint8)
-        img = img.reshape(f.canvas.get_width_height()[::-1] + (3,))
-        # img is rgb, convert to opencv's default bgr
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        # config vars
+        self.num_nodes = num_nodes
+        self.data_f = data_f
+        self.shuffle_data = shuffle_data
+        self.seed = seed
+        self.init()
 
-        assert mode in ["human", "rgb_array"], "Invalid mode, must be either \"human\" or \"rgb_array\""
-        if mode == "human":
-            cv2.imshow("TSP", img)
-            cv2.waitKey(200)
+    def init(self):
+        super().init()
+        self.reader = GoogleTSPReader(self.num_nodes, -1, 1, self.data_f, shuffle_data=self.shuffle_data)
+        self.reader_iter = self.reader.__iter__()
 
-        elif mode == "rgb_array":
-            return img
+        self.cur_instance = None
+        self.rng = np.random.default_rng(self.seed)
+
+    def reset(self, fetch_next=True):
+        if fetch_next or self.cur_instance is None:
+            # get a new batch from TSPReader and initialize the state
+            try:
+                self.cur_instance = next(self.reader_iter)
+            except StopIteration as e:
+                self.reader_iter = self.reader.__iter__()
+                self.cur_instance = next(self.reader_iter)
+
+        b = self.cur_instance
+        tour_nodes = np.arange(len(b['nodes_coord'][0]), dtype=int)  # greedy_search(b['nodes_coord'][0])
+        self._set_instance_to_state(b, tour_nodes)
+
+    def render(self, mode="human"):
+        self.state.render(mode)
 
     def close(self):
         cv2.destroyAllWindows()
+
+
+class TSP2OptMultiEnv(Env):
+    """
+    class to run multiple episodes in parallel
+    """
+    def __init__(
+        self,
+        num_nodes=10,
+        data_f='../graph-convnet-tsp/data/tsp10_val_concorde.txt',
+        max_num_steps=50,
+        shuffle_data=True,
+        ret_best_state=True,
+        ret_log_tour_len=False,
+        num_samples_per_batch=1,
+        same_instance_per_batch=True,
+        seed=42
+    ):
+        self.envs = []
+        for _ in range(num_samples_per_batch):
+            self.envs.append(
+                TSP2OptEnvBase(
+                    max_num_steps=max_num_steps,
+                    ret_best_state=ret_best_state,
+                    ret_log_tour_len=ret_log_tour_len
+                )
+            )
+        # config vars
+        self.num_nodes = num_nodes
+        self.data_f = data_f
+        self.shuffle_data = shuffle_data
+        self.seed = seed
+        assert num_samples_per_batch > 0
+        self.num_samples_per_batch = num_samples_per_batch
+        self.same_instance_per_batch = same_instance_per_batch
+        self.init()
+
+    def init(self):
+        for env in self.envs:
+            env.init()
+        self.reader = GoogleTSPReader(self.num_nodes, -1, 1, self.data_f, shuffle_data=self.shuffle_data)
+        self.reader_iter = self.reader.__iter__()
+        self.cur_instances = [None for _ in range(self.num_samples_per_batch)]
+        self.rng = np.random.default_rng(self.seed)
+
+    def reset(self, fetch_next=True):
+
+        def try_fetch_next_instance():
+            try:
+                instance = next(self.reader_iter)
+            except StopIteration as e:
+                self.reader_iter = self.reader.__iter__()
+                instance = next(self.reader_iter)
+            return instance
+
+        if fetch_next or self.cur_instances[0] is None:
+            instances = [try_fetch_next_instance()]
+            for i in range(1, self.num_samples_per_batch):
+                # fetch new one only if we use multiple instances
+                if not self.same_instance_per_batch:
+                    instance = try_fetch_next_instance()
+                else:
+                    instance = copy.deepcopy(instances[-1])
+                instances.append(instance)
+            self.cur_instances = instances
+
+        for env, instance in zip(self.envs, self.cur_instances):
+            b = instance
+            tour_nodes = np.random.permutation(len(b['nodes_coord'][0]))
+            env._set_instance_to_state(b, tour_nodes)
+
+    def get_state(self):
+        return [
+            env.get_state() for env in self.envs
+        ]
+
+    def step(self, actions):
+        assert len(actions) == len(self.envs)
+        rets = []
+        for env, action in zip(self.envs, actions):
+            rets.append(env.step(action))
+        return rets
