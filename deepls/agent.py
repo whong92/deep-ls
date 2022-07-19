@@ -1,6 +1,3 @@
-"""An abstract class that specifies the Agent API for RL-Glue-py.
-"""
-
 from abc import ABCMeta, abstractmethod
 import copy
 import numpy as np
@@ -8,8 +5,10 @@ import torch
 from collections import OrderedDict
 from typing import Optional, Any
 
-from deepls.gcn_model import model_input_from_states
+from deepls.gcn_model import model_input_from_states, TSPRGCNValueNet, TSPRGCNActionNet, TSPRGCNLogNormalValueNet
+from deepls.graph_utils import tour_nodes_to_W
 from deepls.TSP2OptEnv import TSP2OptState
+from torch.optim import Adam
 
 
 class BaseAgent:
@@ -72,17 +71,13 @@ class BaseAgent:
 
 
 class LRPCache:
-
-    # initialising capacity
+    """
+    LRP implementation with an ordered dict
+    """
     def __init__(self, capacity: int):
         self.cache = OrderedDict()
         self.capacity = capacity
 
-    # we return the value of the key
-    # that is queried in O(1) and return -1 if we
-    # don't find the key in out dict / cache.
-    # And also move the key to the end
-    # to show that it was recently used.
     def get(self, key: Any) -> Optional[Any]:
         if key not in self.cache:
             return None
@@ -92,11 +87,6 @@ class LRPCache:
     def has(self, key):
         return key in self.cache
 
-    # first, we add / update the key by conventional methods.
-    # And also move the key to the end to show that it was recently used.
-    # But here we will also check whether the length of our
-    # ordered dictionary has exceeded our capacity,
-    # If so we remove the first key (least recently used)
     def put(self, key: Any, value: Any) -> Any:
         self.cache[key] = value
         self.cache.move_to_end(key)
@@ -108,6 +98,7 @@ class LRPCache:
 class ExperienceBuffer:
     def __init__(self, size):
         """
+        Experience buffer for episodic MDP's
         Args:
             size (integer): The size of the replay buffer in terms of number of episodes
         """
@@ -119,12 +110,15 @@ class ExperienceBuffer:
 
     def append(self, episode, state, action, reward, terminal, next_state, timestep, cache):
         """
+        This method can also handle sequences of all the following arguments
         Args:
-            state (Numpy array): The state.
-            action (integer): The action.
+            state (TSP2OptState): The state.
+            action : Whatever is returned from agent.policy(state)
             reward (float): The reward.
-            terminal (integer): 1 if the next state is a terminal state and 0 otherwise.
-            next_state (Numpy array): The next state.
+            terminal (bool): 1 if the next state is a terminal state and 0 otherwise.
+            next_state (TSP2OptState): The next state.
+            timestep (int): the step count in the episode
+            cache (Dict[str, Any]): anything that needs to be cached for this episode (so re-computation can be saved)
         """
         if not self.buffer.has(episode):
             popped_item = self.buffer.put(episode, [])
@@ -132,13 +126,13 @@ class ExperienceBuffer:
                 self.size -= len(popped_item[1])
 
         self.buffer.get(episode).append({
-            'state': state,
-            'action': action,
-            'reward': reward,
-            'terminal': terminal,
-            'next_state': next_state,
-            'ts': timestep,
-            'cache': cache
+            'state': copy.deepcopy(state),
+            'action': copy.deepcopy(action),
+            'reward': copy.deepcopy(reward),
+            'terminal': copy.deepcopy(terminal),
+            'next_state': copy.deepcopy(next_state),
+            'ts': copy.deepcopy(timestep),
+            'cache': copy.deepcopy(cache)
         })
         self.size += 1
 
@@ -181,7 +175,6 @@ class REINFORCEAgent(BaseAgent):
     def _agent_init(self, agent_config):
         pass
 
-    # Work Required: No.
     def agent_init(self, agent_config={}):
         """Setup variables to track state
         """
@@ -189,7 +182,6 @@ class REINFORCEAgent(BaseAgent):
         self.last_action = None
         self.last_cache = None  # anything that needs caching for timestep t-1
 
-        self.sum_rewards = 0
         self.episode_steps = 0
         self.episode = -1
 
@@ -197,19 +189,17 @@ class REINFORCEAgent(BaseAgent):
 
         self._agent_init(agent_config)
         self.init_replay_buffer(agent_config['replay_buffer_size'])
-        self.minibatch_size = agent_config['minibatch_sz']
+        self.batch_size = agent_config['batch_sz']
 
     # Work Required: No.
     def agent_start(self, state):
         """The first method called when the experiment starts, called after
         the environment starts.
         Args:
-            state (Numpy array): the state from the
-                environment's evn_start function.
+            state (Sequence[TSP2OptState]): the (multi)state from the environment's evn_start function.
         Returns:
             The first action the agent takes.
         """
-        self.sum_rewards = 0
         self.episode_steps = 0
         self.episode += 1
         self.last_state = copy.deepcopy(state)
@@ -234,8 +224,8 @@ class REINFORCEAgent(BaseAgent):
     def agent_step(self, reward, state):
         """A step taken by the agent.
         Args:
-            reward (float): the reward received for taking the last action taken
-            state (Numpy array): the state from the
+            reward (Sequence[float]): the rewards received for taking the last action taken
+            state (Sequence[TSP2OptState]): the (multi)state from the
                 environment's step based, where the agent ended up after the
                 last step
         Returns:
@@ -243,18 +233,18 @@ class REINFORCEAgent(BaseAgent):
         """
         self.episode_steps += 1
 
-        # Append new experience to replay buffer
-        # TODO: deepcopy in replay buffer instead
-        self.replay_buffer.append(
-            self.episode,
-            copy.deepcopy(self.last_state),
-            copy.deepcopy(self.last_action),
-            reward,
-            False,
-            copy.deepcopy(state),
-            self.episode_steps,
-            copy.deepcopy(self.last_cache)
-        )
+        if self.train:
+            # Append new experience to replay buffer - it deep copies everything so no need to worry about it
+            self.replay_buffer.append(
+                self.episode,
+                self.last_state,
+                self.last_action,
+                reward,
+                False,
+                state,
+                self.episode_steps,
+                self.last_cache
+            )
         # Select action
         action, cache = self.policy(state)
 
@@ -274,44 +264,41 @@ class REINFORCEAgent(BaseAgent):
     def agent_end(self, reward):
         """Run when the agent terminates.
         Args:
-            reward (float): the reward the agent received for entering the
+            reward (Sequence[float]): the rewards the agent received for entering the
                 terminal state.
         """
-        self.sum_rewards += reward
         self.episode_steps += 1
 
-        # TODO: figure out terminal state rep
-        # for now don't store terminal state, but propagate its return
-        terminal_state = None
-        # Append new experience to replay buffer
-        #         self.replay_buffer.append(
-        #             self.episode,
-        #             copy.deepcopy(self.last_state),
-        #             copy.deepcopy(self.last_action),
-        #             reward,
-        #             True,
-        #             terminal_state,
-        #             self.episode_steps,
-        #             copy.deepcopy(self.last_cache)
-        #         )
-
-        # compute rewards
-        experience = self.replay_buffer.get_episode(self.episode)
-        returns = torch.flip(
-            torch.cumsum(torch.Tensor([reward] + [step['reward'] for step in experience][::-1]), dim=0), dims=[0])
-        for ret, step in zip(returns, experience):
-            step['cache']['return'] = ret.item()
-
         if self.train:
-            # Perform replay steps:
-            if self.replay_buffer.get_size() >= self.minibatch_size:
-                # TODO: maybe run multiple optimize steps?
-                # Get sample experiences from the replay buffer and optimize
-                experiences_dict = self.replay_buffer.sample_experience(self.minibatch_size)
-                self.agent_optimize(experiences_dict)
+            terminal_state = None
+            # Append new experience to replay buffer
+            self.replay_buffer.append(
+                self.episode,
+                self.last_state,
+                self.last_action,
+                reward,
+                True,
+                terminal_state,
+                self.episode_steps,
+                self.last_cache
+            )
 
-                # TODO: maybe don't flush and tolerate stale episodes? Use off-policy updates maybe
-                # self.replay_buffer.flush()
+            # compute returns - no discounting for now
+            experience = self.replay_buffer.get_episode(self.episode)
+            returns = torch.flip(
+                torch.cumsum(
+                    torch.as_tensor([step['reward'] for step in experience][::-1]),
+                    dim=0
+                ),
+                dims=[0]
+            )  # num_steps x batch_size
+            for ret, step in zip(returns, experience):
+                step['cache']['return'] = ret
+                step['cache']['average_return'] = torch.mean(ret) * torch.ones_like(ret)
+
+            # Perform replay steps:
+            experiences_dict = self.replay_buffer.sample_experience(self.replay_buffer.get_size())
+            self.agent_optimize(experiences_dict)
 
 
 def _make_random_move(state: TSP2OptState):
@@ -327,14 +314,17 @@ def _make_random_move(state: TSP2OptState):
 
 class RandomActionREINFORCEAgent(REINFORCEAgent):
 
-    def policy(self, state):
+    def policy(self, states):
         """
         run this with provided state to get action
         """
-        e0, e1 = _make_random_move(state)
-        action = {'terminate': False, 'e0': e0, 'e1': e1}
-        model_input = model_input_from_states([state])
-        return action, {'model_input': model_input}
+        states = [state[0] for state in states]
+        actions = []
+        for state in states:
+            e0, e1 = _make_random_move(state)
+            action = {'terminate': False, 'e0': e0, 'e1': e1}
+            actions.append(action)
+        return actions, {}
 
     def agent_optimize(self, experiences):
         """
@@ -343,9 +333,72 @@ class RandomActionREINFORCEAgent(REINFORCEAgent):
         pass
 
 
-from torch.optim import Adam
-from deepls.gcn_model import TSPRGCNValueNet, TSPRGCNActionNet, TSPRGCNLogNormalValueNet
-from deepls.graph_utils import tour_nodes_to_W
+class ActionNetRunner:
+    """
+    wraps a bunch of methods that can be re-used to run the policy
+    """
+    def __init__(self, net: TSPRGCNActionNet, device):
+        self.net = net
+        self.device = device
+
+    def policy(self, states):
+        """
+        :param states: sequence of tuple of 2 TSP2OptEnv states - the current state and the best state so far
+        :return:
+            actions - the actions sampled for this set of states
+            cache - stuff that the policy net expects to be cached (to avoid re-computation), and returned to it in
+            the list of experiences which is given in e.g. get_action_pref method
+        """
+        best_states = [state[1] for state in states]
+        states = [state[0] for state in states]
+        # cur state
+        x_edges, x_edges_values, x_nodes_coord, x_tour = list(model_input_from_states(states))
+        # best_state
+        _, _, _, x_best_tour = model_input_from_states(best_states)
+        # get x_tour_directed
+        x_tour_directed = torch.stack([
+            torch.as_tensor(tour_nodes_to_W(state.tour_nodes, directed=True))
+            for state in states
+        ], dim=0)
+
+        model_input = [x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, x_tour_directed]
+        with torch.no_grad():
+            edges, pis, action_idxs = self.net(*[t.clone().to(self.device) for t in model_input])
+        edges = edges.detach().to('cpu')
+        # edge_0, edge_1 = edges[0, :, 1:]
+        edges_0 = edges[:, 0, 1:]
+        edges_1 = edges[:, 1, 1:]
+        actions = [
+            {'terminate': False, 'e0': edge_0, 'e1': edge_1}
+            for edge_0, edge_1 in zip(edges_0, edges_1)
+        ]
+        cache = {
+            'model_input': model_input, 'action': action_idxs.detach().to('cpu'),
+            'action_pref': pis.detach().to('cpu'), 'tour_len': [state.tour_len for state in states]
+        }
+        return actions, cache
+
+    def get_action_pref(self, experiences, perm):
+        """
+        given sampled experiences,
+        :param experiences:
+        :param perm:
+        :return:
+        action pref, h_sa - may contain gradient
+        """
+        cached_inputs = [e['cache']['model_input'] for e in experiences]
+        x_edges = torch.cat([c[0] for c in cached_inputs], dim=0)[perm]
+        x_edges_values = torch.cat([c[1] for c in cached_inputs], dim=0)[perm]
+        x_nodes_coord = torch.cat([c[2] for c in cached_inputs], dim=0)[perm]
+        x_tour = torch.cat([c[3] for c in cached_inputs], dim=0)[perm]
+        x_best_tour = torch.cat([c[4] for c in cached_inputs], dim=0)[perm]
+        x_tour_directed = torch.cat([c[5] for c in cached_inputs], dim=0)[perm]
+        actions = torch.cat([e['cache']['action'] for e in experiences], dim=0)[perm]
+
+        model_inputs = [x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, actions, x_tour_directed]
+        _, h_sa, _ = self.net.get_action_pref(*[t.clone().to(self.device) for t in model_inputs])
+        return h_sa
+
 
 class GRCNCriticBaselineAgent(REINFORCEAgent):
 
@@ -394,13 +447,14 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
             betas=(optimizer_config['beta_m'], optimizer_config['beta_v']),
             eps=optimizer_config['epsilon']
         )
+        self.action_net_runner = ActionNetRunner(self.net, device)
 
-        self.value_net_type = agent_config['model'].get('value_net_type', 'normal')
+        self.value_net_type = model_config.get('value_net_type', 'normal')
         if self.value_net_type == 'normal':
-            self.critic_baseline = TSPRGCNValueNet(agent_config['model']).to(self.device)
+            self.critic_baseline = TSPRGCNValueNet(model_config).to(self.device)
             self.critic_loss = torch.nn.HuberLoss(delta=0.2).to(self.device)
         elif self.value_net_type == 'lognormal':
-            self.critic_baseline = TSPRGCNLogNormalValueNet(agent_config['model']).to(self.device)
+            self.critic_baseline = TSPRGCNLogNormalValueNet(model_config).to(self.device)
         else:
             raise ValueError(f"value_net_type not recognized: {self.value_net_type}")
 
@@ -416,59 +470,39 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
 
         self.policy_optimize_every = agent_config['policy_optimize_every']
         self.critic_optimize_every = agent_config['critic_optimize_every']
+        self.minibatch_size = agent_config['minibatch_sz']
         self.greedy = False
 
-    def compute_baseline(self, experiences):
+    def compute_baseline_and_loss(self, experiences, perm, returns):
         cached_inputs = [e['cache']['model_input'] for e in experiences]
-        x_edges = torch.cat([c[0] for c in cached_inputs], dim=0)
-        x_edges_values = torch.cat([c[1] for c in cached_inputs], dim=0)
-        x_nodes_coord = torch.cat([c[2] for c in cached_inputs], dim=0)
-        x_tour = torch.cat([c[3] for c in cached_inputs], dim=0)
-        x_best_tour = torch.cat([c[4] for c in cached_inputs], dim=0)
+        x_edges = torch.cat([c[0] for c in cached_inputs], dim=0)[perm]
+        x_edges_values = torch.cat([c[1] for c in cached_inputs], dim=0)[perm]
+        x_nodes_coord = torch.cat([c[2] for c in cached_inputs], dim=0)[perm]
+        x_tour = torch.cat([c[3] for c in cached_inputs], dim=0)[perm]
+        x_best_tour = torch.cat([c[4] for c in cached_inputs], dim=0)[perm]
         model_inputs = [x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour]
-        # model_inputs = [x_edges, x_edges_values, x_nodes_coord, torch.ones_like(x_tour), torch.ones_like(x_best_tour)]
-        return self.critic_baseline(*[t.clone().to(self.device) for t in model_inputs])
-        # return torch.zeros(len(cached_inputs))
 
-    def get_action_pref(self, experiences):
-        cached_inputs = [e['cache']['model_input'] for e in experiences]
-        x_edges = torch.cat([c[0] for c in cached_inputs], dim=0)
-        x_edges_values = torch.cat([c[1] for c in cached_inputs], dim=0)
-        x_nodes_coord = torch.cat([c[2] for c in cached_inputs], dim=0)
-        x_tour = torch.cat([c[3] for c in cached_inputs], dim=0)
-        x_best_tour = torch.cat([c[4] for c in cached_inputs], dim=0)
-        x_tour_directed = torch.cat([c[5] for c in cached_inputs], dim=0)
-        actions = torch.cat([e['cache']['action'] for e in experiences], dim=0)
+        baseline, critic_loss = None, None
+        if self.value_net_type == 'normal':
+            baseline = self.critic_baseline(*[t.clone().to(self.device) for t in model_inputs])
+            critic_loss = self.critic_loss(baseline, returns)
+        elif self.value_net_type == 'lognormal':
+            baseline_dist: torch.distributions.LogNormal = \
+                self.critic_baseline(*[t.clone().to(self.device) for t in model_inputs])
+            baseline = -baseline_dist.mean
+            critic_loss = -baseline_dist.log_prob(-returns).mean()
 
-        # print(torch.as_tensor([e['reward'] for e in experiences]))
-        model_inputs = [x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, actions, x_tour_directed]
-        _, h_sa, _ = self.net.get_action_pref(*[t.clone().to(self.device) for t in model_inputs])
-        return h_sa
+        return baseline, critic_loss
 
     def set_greedy(self, greedy=False):
         self.greedy = greedy
         self.net.set_greedy(greedy)
 
-    def policy(self, state):
+    def policy(self, states):
         """
         run this with provided state to get action
         """
-        state, best_state = state
-        # cur state
-        x_edges, x_edges_values, x_nodes_coord, x_tour = list(model_input_from_states([state]))
-        # best_state
-        _, _, _, x_best_tour = model_input_from_states([best_state])
-        # get x_tour_directed
-        x_tour_directed = torch.as_tensor(tour_nodes_to_W(state.tour_nodes, directed=True)).unsqueeze(0)
-
-        model_input = [x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, x_tour_directed]
-        with torch.no_grad():
-            edges, pis, action_idxs = self.net(*[t.clone().to(self.device) for t in model_input])
-        edges = edges.detach().to('cpu')
-        edge_0, edge_1 = edges[0, :, 1:]
-        action = {'terminate': False, 'e0': edge_0, 'e1': edge_1}
-        return action, {'model_input': model_input, 'action': action_idxs.detach().to('cpu'),
-                        'action_pref': pis.detach().to('cpu'), 'tour_len': state.tour_len}
+        return self.action_net_runner.policy(states)
 
     def agent_optimize(self, experiences):
         """
@@ -477,36 +511,47 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
         optimize_policy = (self.episode % self.policy_optimize_every == 0) \
                           and (self.episode > self.dont_optimize_policy_steps)
         optimize_critic = self.episode % self.critic_optimize_every == 0
-        if optimize_policy or optimize_critic:
-            returns = torch.as_tensor([e['cache']['return'] for e in experiences])
-            if self.value_net_type == 'normal':
-                baseline = self.compute_baseline(experiences)
-            elif self.value_net_type == 'lognormal':
-                baseline_dist: torch.distributions.LogNormal = self.compute_baseline(experiences)
-                baseline = -baseline_dist.mean
 
-        if optimize_policy:
-            h_sa = self.get_action_pref(experiences)
-            eligibility_loss = -h_sa  # NLL loss
-            td_err = returns.clone().to(self.device) - baseline.detach()
-            # print(baseline[0], returns[0])
-            policy_loss = (td_err.to(self.device) * eligibility_loss).mean()  # TODO: discounting!(?)
-            policy_loss.backward()
-            self.optimizer.step()
+        returns = torch.cat([e['cache']['return'] for e in experiences], dim=0).float()
+        if len(returns) < self.batch_size:
+            return
+        perm = np.random.choice(len(returns), self.batch_size, replace=False)
+        returns = returns[perm]
 
-        if optimize_critic:
-            _returns = returns.clone().to(self.device)
-            if self.value_net_type == 'normal':
-                critic_loss = self.critic_loss(baseline, _returns)
-            elif self.value_net_type == 'lognormal':
-                critic_loss = -baseline_dist.log_prob(-_returns).mean()
+        self.optimizer.zero_grad()
+        self.critic_optimizer.zero_grad()
+        for (minibatch_perm, minibatch_returns), weight in \
+                iter_over_tensor_minibatch(perm, returns, minibatch_size=self.minibatch_size):
+
+            minibatch_baseline = None
+            critic_loss = None
+            if optimize_critic or optimize_policy:
+                _returns = minibatch_returns.clone().to(self.device)
+                if optimize_critic:
+                    minibatch_baseline, critic_loss = self.compute_baseline_and_loss(experiences, minibatch_perm, _returns)
+                    critic_loss.backward()
+                else:
+                    with torch.no_grad():
+                        minibatch_baseline, critic_loss = self.compute_baseline_and_loss(experiences, minibatch_perm, _returns)
+
+            # TODO: use this to deal with accumulating gradients
+            if optimize_policy:
+                h_sa = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
+                eligibility_loss = -h_sa  # NLL loss
+                td_err = minibatch_returns.clone().to(self.device) - minibatch_baseline.detach()
+                policy_loss = (td_err.to(self.device) * eligibility_loss).mean()  # TODO: discounting!(?)
+                policy_loss.backward()
+
             self.critic_loss_val = critic_loss.detach().to('cpu')
-            critic_loss.backward()
-            self.critic_optimizer.step()
-            self.critic_abs_err = torch.abs(baseline - _returns).mean().detach().to('cpu')
+            self.critic_abs_err = torch.abs(
+                minibatch_baseline.detach().to('cpu') - minibatch_returns
+            ).mean()
+
+        self.critic_optimizer.step()
+        self.optimizer.step()
 
 
-class GRCNRollingBaselineAgent(REINFORCEAgent):
+class AverageStateRewardBaselineAgent(REINFORCEAgent):
 
     def set_train(self):
         super().set_train()
@@ -520,9 +565,7 @@ class GRCNRollingBaselineAgent(REINFORCEAgent):
         bla = {
             'agent_config': self.agent_config,
             'net': self.net.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
-            'critic_baseline': self.critic_baseline,
-            'step_size_critic': self.step_size_critic
+            'optimizer': self.optimizer.state_dict()
         }
         torch.save(bla, path)
 
@@ -533,8 +576,6 @@ class GRCNRollingBaselineAgent(REINFORCEAgent):
         if init_config:
             self.agent_init(agent_config)
         self.net.load_state_dict(bla['net'])
-        self.critic_baseline = bla['critic_baseline']
-        self.step_size_critic = bla['step_size_critic']
         self.optimizer.load_state_dict(bla['optimizer'])
 
     def _agent_init(self, agent_config):
@@ -544,9 +585,6 @@ class GRCNRollingBaselineAgent(REINFORCEAgent):
         device = agent_config.get('device', 'cpu')
         self.device = device
 
-        self.dont_optimize_policy_steps = model_config.get('dont_optimize_policy_steps', 0)
-
-        self.steps = 0
         self.net = TSPRGCNActionNet(model_config).to(device)
         self.optimizer = Adam(
             self.net.parameters(),
@@ -554,77 +592,74 @@ class GRCNRollingBaselineAgent(REINFORCEAgent):
             betas=(optimizer_config['beta_m'], optimizer_config['beta_v']),
             eps=optimizer_config['epsilon']
         )
-        self.critic_baseline = 0.
-        self.critic_loss_val = 0.
-        self.critic_abs_err = 0.
-        self.step_size_critic = optimizer_config['step_size_critic']
+        self.action_net_runner = ActionNetRunner(self.net, device)
+        self.dont_optimize_policy_steps = model_config.get('dont_optimize_policy_steps', 0)
+        self.critic_abs_err = None
 
-    def compute_baseline(self, experiences):
-        return (torch.ones(len(experiences)) * self.critic_baseline).to(self.device)
+        self.policy_optimize_every = agent_config['policy_optimize_every']
+        self.minibatch_size = agent_config['minibatch_sz']
+        self.greedy = False
 
-    def get_action_pref(self, experiences):
-        cached_inputs = [e['cache']['model_input'] for e in experiences]
-        x_edges = torch.cat([c[0] for c in cached_inputs], dim=0)
-        x_edges_values = torch.cat([c[1] for c in cached_inputs], dim=0)
-        x_nodes_coord = torch.cat([c[2] for c in cached_inputs], dim=0)
-        x_tour = torch.cat([c[3] for c in cached_inputs], dim=0)
-        x_best_tour = torch.cat([c[4] for c in cached_inputs], dim=0)
-        x_tour_directed = torch.cat([c[5] for c in cached_inputs], dim=0)
-        actions = torch.cat([e['cache']['action'] for e in experiences], dim=0)
+    def compute_baseline(self, experiences, perm):
+        average_returns = torch.cat([e['cache']['average_return'] for e in experiences], dim=0)[perm]
+        return average_returns
 
-        # print(torch.as_tensor([e['reward'] for e in experiences]))
-        model_inputs = [x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, actions, x_tour_directed]
-        _, h_sa, _ = self.net.get_action_pref(*[t.clone().to(self.device) for t in model_inputs])
-        return h_sa
+    def set_greedy(self, greedy=False):
+        self.greedy = greedy
+        self.net.set_greedy(greedy)
 
-    def policy(self, state):
+    def policy(self, states):
         """
         run this with provided state to get action
         """
-        state, best_state = state
-        # cur state
-        x_edges, x_edges_values, x_nodes_coord, x_tour = list(model_input_from_states([state]))
-        # best_state
-        _, _, _, x_best_tour = model_input_from_states([best_state])
-        # get x_tour_directed
-        x_tour_directed = torch.as_tensor(tour_nodes_to_W(state.tour_nodes, directed=True)).unsqueeze(0)
-
-        model_input = [x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, x_tour_directed]
-        with torch.no_grad():
-            edges, pis, action_idxs = self.net(*[t.clone().to(self.device) for t in model_input])
-        edges = edges.detach().to('cpu')
-        edge_0, edge_1 = edges[0, :, 1:]
-        action = {'terminate': False, 'e0': edge_0, 'e1': edge_1}
-        return action, {'model_input': model_input, 'action': action_idxs.detach().to('cpu'),
-                        'action_pref': pis.detach().to('cpu'), 'tour_len': state.tour_len}
+        return self.action_net_runner.policy(states)
 
     def agent_optimize(self, experiences):
         """
         run this with provided experiences to run one step of optimization
         """
-        returns = torch.as_tensor([e['cache']['return'] for e in experiences])
-        if self.episode <= self.dont_optimize_policy_steps:
-            if self.episode == 0:
-                self.critic_baseline = returns.mean()
-                self.critic_loss_val = 0
-            else:
-                step_size = 1. / (self.episode)
-                self.critic_baseline = returns.mean() * step_size + (1. - step_size) * self.critic_baseline
-                self.critic_loss_val = self.critic_baseline - returns.mean()
+        optimize_policy = (self.episode % self.policy_optimize_every == 0) \
+                          and (self.episode > self.dont_optimize_policy_steps)
 
-        baseline = self.compute_baseline(experiences)
+        # always try and get an estimate of the critic abs_err
+        returns = torch.cat([e['cache']['return'] for e in experiences], dim=0).float()
+        if len(returns) < self.batch_size:
+            return
+        perm = np.random.choice(len(returns), self.batch_size, replace=False)
+        returns = returns[perm]
+        baseline = self.compute_baseline(experiences, perm)
+        self.critic_abs_err = torch.abs(baseline - returns).mean().detach().to('cpu')
 
-        # optimize policy
-        h_sa = self.get_action_pref(experiences)
-        eligibility_loss = -h_sa  # NLL loss
-        td_err = returns.clone().to(self.device) - baseline.detach()
-        # print(baseline[0], returns[0])
-        policy_loss = (td_err.to(self.device) * eligibility_loss).mean()  # TODO: discounting!(?)
-        policy_loss.backward()
-        self.optimizer.step()
+        if optimize_policy:
+            self.optimizer.zero_grad()
+            for (minibatch_perm, minibatch_returns, minibatch_baseline), weight in \
+                    iter_over_tensor_minibatch(perm, returns, baseline, minibatch_size=self.minibatch_size):
+                h_sa = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
+                eligibility_loss = -h_sa  # NLL loss
+                td_err = (minibatch_returns.clone() - minibatch_baseline.detach()).to(self.device)
+                policy_loss = (td_err.to(self.device) * eligibility_loss).mean() * weight  # TODO: discounting!(?)
+                policy_loss.backward()
+            self.optimizer.step()
 
-        rb_step_size = self.step_size_critic
-        # optimize critic
-        self.critic_baseline = self.critic_baseline * (1 - rb_step_size) + rb_step_size * returns.mean()
-        self.critic_loss_val = torch.abs(self.critic_baseline - returns.mean())
-        self.critic_abs_err = self.critic_loss_val
+
+def iter_over_tensor_minibatch(*tensors, minibatch_size):
+    """
+    for tensors of size (batchsize, ...), break it up into minibatches of size minibatch_size and iterate over them
+    also returns the weight of each minibatch defined as:
+    weight_i = minibatch_i_size / batchsize
+    :param tensors:
+    :param minibatch_size:
+    :return:
+    """
+    batch_size = tensors[0].shape[0]
+    num_whole_batch = batch_size // minibatch_size
+    has_partial_batch = (batch_size % minibatch_size) != 0
+    mini_batch_weights = [minibatch_size / batch_size for _ in range(num_whole_batch)]
+    mini_batch_sizes = [minibatch_size for _ in range(num_whole_batch)]
+    if has_partial_batch:
+        mini_batch_weights += [(batch_size % minibatch_size) / batch_size]
+        mini_batch_sizes += [batch_size % minibatch_size]
+    mini_batch_offsets = np.cumsum([0] + mini_batch_sizes)
+    for start, end, weight in zip(mini_batch_offsets[:-1], mini_batch_offsets[1:], mini_batch_weights):
+        minibatch_tensors = [tensor[start:end] for tensor in tensors]
+        yield minibatch_tensors, weight

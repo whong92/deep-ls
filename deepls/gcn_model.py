@@ -8,6 +8,14 @@ import copy
 
 
 def model_input_from_states(states):
+    """
+    :param states: list of TSP2OptStates
+    :return:
+    x_edges - b x v x v boolean - adj matrix (in this case it's just all ones since we assume a fully-connected graph)
+    x_edges_values -  b x v x v - edge weights (distances)
+    x_nodes_coord -  b x v - node coordinates
+    x_tour -  b x v x v - adj matrix representing the tour
+    """
     x_edges = []
     x_edges_values = []
     x_nodes_coord = []
@@ -23,38 +31,6 @@ def model_input_from_states(states):
            torch.cat(x_tour, dim=0)
 
 
-def tour_emb_from_edge_emb(e_emb: torch.Tensor, tour_mask: torch.Tensor):
-    """
-    givem edge embeddings and an adjacency matrix tour_mask, get the embeddings for
-    those tour edges
-    :param e_emb: b x v x v x h
-    :param tour_mask: b x v x v
-    :return:
-    """
-    batch_size, num_nodes, _, _ = e_emb.shape
-    # tour_indices lexicographically sorted, so can trust that it is returned in batch order
-    tour_indices = torch.nonzero(tour_mask)
-    tour_indices = tour_indices[tour_indices[:, 1] < tour_indices[:, 2]]
-    # get tour_embeddings from e_emb and tour_indices
-    # these are embeddings for edges i > j
-    tour_emb_l = e_emb[
-        tour_indices[:, 0],
-        tour_indices[:, 1],
-        tour_indices[:, 2]
-    ].reshape(batch_size, num_nodes, -1)
-    # these are embeddings for edges j > i
-    tour_emb_r = e_emb[
-        tour_indices[:, 0],
-        tour_indices[:, 2],
-        tour_indices[:, 1]
-    ].reshape(batch_size, num_nodes, -1)
-    # just sum it up for now to combine
-    tour_emb = tour_emb_l + tour_emb_r
-    tour_indices_b = tour_indices.reshape(batch_size, num_nodes, -1)
-
-    return tour_emb, tour_indices_b
-
-
 def sample_tour_logit(
     tour_logit: torch.Tensor,
     tour_indices: torch.Tensor,
@@ -63,13 +39,19 @@ def sample_tour_logit(
     greedy: bool = False
 ):
     """
-    given a tour logit, sample an action and return the associated edges, and log prob
+    given edge pairs, sample an action (an edge pair) and return the associated edges, and log prob
     if actions is not None, don't sampled and compute the log prob of the supplied actions
     instead
-    :param tour_logit: b x v
-    :param tour_indices: b x v x 3 - last dimension is (batch idx, left node, right node) resp.
-    :param actions: b - tensor of actions
+    :param tour_logit: b x n_edge_pairs
+    :param tour_indices: b x n_edge_pairs x 6 - last dimension is (_, u, v, _, x, y) where (u, v) and (x, y) are
+    the edges to swap
+    :param actions: b - tensor of actions, if not none, we don't sample anything and just compute the log prob
+    :param tau: float - temperature for softmax over tour logits - high temperatures encourage exploration
+    :param greedy: boolean - greedily choose the best edge ie argmax (tour_logit)
     :return:
+    actions: the index of the action in [0, n_edge_pairs - 1] s.t. tour_indices[batch, action] = (_, u, v), (_, x, y)
+    edges: the edges (u, v), (x, y) of the actions
+    pi: the log prob of the action - for computing policy gradients
     """
     batch_size = tour_logit.shape[0]
     # make a distribution of the tour and sample action
@@ -84,76 +66,6 @@ def sample_tour_logit(
     # convert actions into edges via tour indices
     edges = tour_indices[torch.arange(batch_size), actions]  # b x 3
     return actions, edges, pi
-
-
-# def mask_tour_logit(tour_logit, actions):
-#     """
-#     masks out the logits of the tour, whose indices appear in actions
-#     :param tour_logit: b x v, the current logit vector
-#     :param actions: b, list of indices of actions taken
-#     :return:
-#     """
-#     batch_size, _ = tour_logit.shape
-#     # mask out sampled action
-#     mask = torch.zeros_like(tour_logit, dtype=torch.float, requires_grad=False)
-#     mask[torch.arange(batch_size), actions] = 1.
-#     inf_mask = torch.zeros_like(tour_logit, dtype=torch.float, requires_grad=False)
-#     inf_mask[torch.arange(batch_size), actions] = -float("inf")
-#     # distribution for 2nd edge
-#     tour_logit_masked = tour_logit * (1. - mask) + inf_mask
-#     return tour_logit_masked
-
-
-# class TSPRGCNModel(nn.Module):
-#     def __init__(self, config):
-#         super(TSPRGCNModel, self).__init__()
-#         self.rgcn = ResidualGatedGCNModel(config)
-#         self.hidden_dim = config['hidden_dim']
-#         self.action_net = MLP(self.hidden_dim, output_dim=1)
-#
-#     def evaluate_actions_from_e_emb(self, e_emb, x_tour, actions: Optional[torch.Tensor] = None):
-#         # get embeddings only for edges on the current tour (the ones we want to sample)
-#         tour_emb, tour_indices = tour_emb_from_edge_emb(e_emb, x_tour)  # b x v x h , b x v x 3
-#         # compute logits for tour, and sample a single edge
-#         tour_logit_0 = self.action_net(tour_emb).squeeze(-1)  # b x v
-#         actions_0 = None
-#         actions_1 = None
-#         if actions is not None:
-#             actions_0 = actions[:, 0]
-#             actions_1 = actions[:, 1]
-#         actions_0, edges_0, pi_0 = sample_tour_logit(tour_logit_0, tour_indices, actions_0)
-#         # compute logits for tour again, masking out sampled edges, and sample another edge
-#         tour_logit_1 = mask_tour_logit(tour_logit_0, actions_0)
-#         actions_1, edges_1, pi_1 = sample_tour_logit(tour_logit_1, tour_indices, actions_1)
-#         # avengers assemble
-#         edges = torch.stack((edges_0, edges_1), dim=1)  # b x 2 x 3
-#         pis = torch.stack((pi_0, pi_1), dim=1)  # b x 2
-#         actions = torch.stack((actions_0, actions_1), dim=1)
-#         return edges, pis, actions
-#
-#     def forward(self, x_edges, x_edges_values, x_nodes_coord, x_tour):
-#         """
-#         x_edges: b x v x v
-#         x_edges_values: b x v x v
-#         x_nodes_coord: b x v x 2
-#         x_tour: b x v x v
-#         """
-#         x_emb, e_emb = self.rgcn(x_edges, x_edges_values, x_nodes_coord)
-#         return self.evaluate_actions_from_e_emb(e_emb, x_tour)
-#
-#     def get_action_pref(self, x_edges, x_edges_values, x_nodes_coord, x_tour, actions):
-#         """
-#         same as forward, but actions are given
-#         :param x_edges:
-#         :param x_edges_values:
-#         :param x_nodes_coord:
-#         :param x_tour:
-#         :param actions:
-#         :return:
-#         """
-#         x_emb, e_emb = self.rgcn(x_edges, x_edges_values, x_nodes_coord)
-#         return self.evaluate_actions_from_e_emb(e_emb, x_tour, actions)
-
 
 
 # TODO: use pytorch-geometric implementation for a more updated version
@@ -238,6 +150,8 @@ def normalize_edges_tour(x_tour_directed, bs, us, vs):
 
 def get_edge_quad_embs(e_emb, x_tour, x_tour_directed):
     """
+    this method is fairly tedious so excuse the verbosity and repetition
+
     for every edge pair (u, v), (x, y) in x_tour, identify the 2opt neighbor edges
     (u, x), (v, y), and concatenate the edge embeddings emb(u, v), emb(x, y), emb(u, x),
     emb(v, y) to give the embedding for the 2opt action
@@ -245,18 +159,21 @@ def get_edge_quad_embs(e_emb, x_tour, x_tour_directed):
     :param e_emb: b x v x v x h - edge embeddings
     :param x_tour: b x v x v - binary tour adjacency mat
     :param x_tour_directed: b x v x v - binary directed tour adjacency mat
-    :return: quadruplet embeddings of each 2opt action
+    :return:
+    action_quad - quadruplet embeddings of each 2opt action, [emb(u, v), emb(x, y), emb(u, x), emb(v, y)] - (b, n_edge_pairs, 4)
+    tour_indices_cat - the edges of the 2opt action (u, v), (x, y) - (b, n_edge_pairs, 6)
     """
     b, v, _, _ = e_emb.shape
     tour_indices = torch.nonzero(x_tour)
     tour_indices = tour_indices[tour_indices[:, 1] < tour_indices[:, 2]]
-    tour_indices = tour_indices.reshape(b, v, -1)
+    tour_indices = tour_indices.reshape(b, v, -1)  # b x v x 3 - last dim is (b, u, v)
     tour_indices_cat = torch.cat([
         tour_indices.unsqueeze(2).repeat(1, 1, v, 1),
         tour_indices.unsqueeze(1).repeat(1, v, 1, 1)
-    ], dim=3)
+    ], dim=3) # b x v x v x 3
+    # indices of a v x v matrix where j > i
     rs, cs = torch.triu_indices(v, v, offset=1)
-    tour_indices_cat = tour_indices_cat[:, rs, cs, :]  # b x v x 6
+    tour_indices_cat = tour_indices_cat[:, rs, cs, :]  # b x v x 6 - last dim is (b, u, v, b, x, y)
 
     x_tour_directed = x_tour_directed.bool()
     b, n_edge_pairs, _ = tour_indices_cat.shape
@@ -265,11 +182,13 @@ def get_edge_quad_embs(e_emb, x_tour, x_tour_directed):
     vs = tour_indices_cat[:, :, 2].reshape(-1)
     xs = tour_indices_cat[:, :, 4].reshape(-1)
     ys = tour_indices_cat[:, :, 5].reshape(-1)
+    # normalize the edges so they always point forward in the tour, this way there is a unique (u, v) and (x, y)
     us, vs = normalize_edges_tour(x_tour_directed, bs, us, vs)
     xs, ys = normalize_edges_tour(x_tour_directed, bs, xs, ys)
 
     orig_pair_emb = torch.cat([e_emb[bs, us, vs, :], e_emb[bs, xs, ys, :]], dim=1)
     new_pair_emb = torch.cat([e_emb[bs, us, xs, :], e_emb[bs, vs, ys, :]], dim=1)
+    # compile [emb(u, v), emb(x, y), emb(u, x), emb(v, y)]
     action_quad = torch.cat((orig_pair_emb, new_pair_emb), dim=1).reshape((b, n_edge_pairs, -1))
 
     return action_quad, tour_indices_cat
@@ -362,10 +281,9 @@ class TSPRGCNActionNet(nn.Module):
         tour_deltas: b x v
         """
         b, _, _ = x_edges.shape
-        tour_emb_cat, tour_indices_cat = self.compute_state_tour_embeddings(x_edges, x_edges_values, x_nodes_coord,
-                                                                            x_tour, x_best_tour, x_tour_directed)
-        tour_emb_cat = self.pre_action_net(tour_emb_cat)
-        tour_logits = self.action_net(tour_emb_cat)
+        tour_logits, tour_indices_cat = self.get_tour_logits(
+            x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, x_tour_directed
+        )
         actions, edges, pi = sample_tour_logit(tour_logits.squeeze(-1), tour_indices_cat, greedy=self.greedy)
 
         return edges.reshape(b, 2, 3), pi, actions
@@ -379,10 +297,18 @@ class TSPRGCNActionNet(nn.Module):
         x_best_tour: b x v x v
         """
         b, _, _ = x_edges.shape
-        tour_emb_cat, tour_indices_cat = self.compute_state_tour_embeddings(x_edges, x_edges_values, x_nodes_coord,
-                                                                            x_tour, x_best_tour, x_tour_directed)
-        tour_emb_cat = self.pre_action_net(tour_emb_cat)
-        tour_logits = self.action_net(tour_emb_cat)
+        tour_logits, tour_indices_cat = self.get_tour_logits(
+            x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, x_tour_directed
+        )
         actions, edges, pi = sample_tour_logit(tour_logits.squeeze(-1), tour_indices_cat, actions=actions)
 
         return edges.reshape(b, 2, 3), pi, actions
+
+    def get_tour_logits(self, x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, x_tour_directed):
+        tour_emb_cat, tour_indices_cat = self.compute_state_tour_embeddings(
+            x_edges, x_edges_values, x_nodes_coord,
+            x_tour, x_best_tour, x_tour_directed
+        )
+        tour_emb_cat = self.pre_action_net(tour_emb_cat)
+        tour_logits = self.action_net(tour_emb_cat)
+        return tour_logits, tour_indices_cat

@@ -47,7 +47,7 @@ def plot_tsp(p, x_coord, W, W_val, W_target, title="default"):
     return p
 
 
-def plot_tsp_heatmap(p, x_coord, W_val, W_pred, title="default"):
+def plot_tsp_heatmap(p, x_coord, W_val, W_pred, title="default", thres=0.25):
     """
     Helper function to plot predicted TSP tours with edge strength denoting confidence of prediction.
     
@@ -70,7 +70,7 @@ def plot_tsp_heatmap(p, x_coord, W_val, W_pred, title="default"):
         edge_preds = []
         for r in range(len(W)):
             for c in range(len(W)):
-                if W[r][c] > 0.25:
+                if W[r][c] > thres:
                     pairs.append((r, c))
                     edge_preds.append(W[r][c])
         return pairs, edge_preds
