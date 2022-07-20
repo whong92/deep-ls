@@ -20,17 +20,19 @@ Some examples of generated solutions by the model on a 100-node TSP:
 Below is an animation of the policy GNN in action, starting from a random, highly suboptmal tour on a 100 node TSP, and 
 exploring the 2-opt neighborhood of the tour at each step, for 100 steps. 
 
-![](images/renders-50-nodes.gif)
+![](images/renders-100-nodes.gif)
 
 # Leaderboard
 
 The following leaderboard is to track progress, based on optimality gaps evaluated on 100 instances of
 TSP problems of size 20, 50 and 100 nodes respectively
 
-| Model / Method                            | TSP-20 | TSP-50 | TSP-100 |
-|-------------------------------------------|--------|--------|---------|
-| Average Rewards Baseline PG (greedy)      | 1.3%   | 6.0%   | 11.1%   |
-| Average Rewards Baseline PG (100 samples) | 0.0%   | 0.6%   | 4.72%   |
+| Model / Method                                    | TSP-20 | TSP-50 | TSP-100 |
+|---------------------------------------------------|--------|--------|---------|
+| Average Rewards Baseline PG (greedy)              | 1.3%   | 6.0%   | 11.1%   |
+| Average Rewards Baseline PG (sampling)            | 0.0%   | 0.6%   | 4.72%   |
+| Average Rewards Baseline PG (greedy + postproc)   | 1.2%   | 4.0%   | 6.5%    |
+| Average Rewards Baseline PG (sampling + postproc) | 0.0%   | 0.06%  | 1.5%    |
 
 
 # Sample efficiency

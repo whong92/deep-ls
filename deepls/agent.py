@@ -3,9 +3,9 @@ import copy
 import numpy as np
 import torch
 from collections import OrderedDict
-from typing import Optional, Any
+from typing import Optional, Any, List
 
-from deepls.gcn_model import model_input_from_states, TSPRGCNValueNet, TSPRGCNActionNet, TSPRGCNLogNormalValueNet
+from deepls.gcn_model import model_input_from_states, TSPRGCNValueNet, TSPRGCNActionNet, TSPRGCNLogNormalValueNet, get_edge_quad_embs
 from deepls.graph_utils import tour_nodes_to_W
 from deepls.TSP2OptEnv import TSP2OptState
 from torch.optim import Adam
@@ -191,7 +191,6 @@ class REINFORCEAgent(BaseAgent):
         self.init_replay_buffer(agent_config['replay_buffer_size'])
         self.batch_size = agent_config['batch_sz']
 
-    # Work Required: No.
     def agent_start(self, state):
         """The first method called when the experiment starts, called after
         the environment starts.
@@ -312,7 +311,7 @@ def _make_random_move(state: TSP2OptState):
     return e1, e2
 
 
-class RandomActionREINFORCEAgent(REINFORCEAgent):
+class RandomActionAgent(BaseAgent):
 
     def policy(self, states):
         """
@@ -326,11 +325,62 @@ class RandomActionREINFORCEAgent(REINFORCEAgent):
             actions.append(action)
         return actions, {}
 
-    def agent_optimize(self, experiences):
+    def agent_start(self, state):
+        return self.policy(state)
+
+    def agent_step(self, reward, state):
+        return self.policy(state)
+
+
+class GreedyAgent(BaseAgent):
+
+    def _make_greedy_move(self, states: List[TSP2OptState]):
+        b = len(states)
+        x_edges, x_edges_values, x_nodes_coord, x_tour = \
+            model_input_from_states(states)
+        x_tour_directed = \
+            torch.stack([
+                torch.as_tensor(tour_nodes_to_W(state.tour_nodes, directed=True))
+                for state in states
+            ], dim=0)
+        # if we treated the edge values as a 1-d edge embedding, and got the embedding of edge quads corresponding to
+        # each 2opt move, action_costs is (b x n_actions, 1), tour_indices is (b x n_actions, 6)
+        edge_quad_weights, tour_indices = \
+            get_edge_quad_embs(
+                x_edges_values.unsqueeze(3), x_tour, x_tour_directed
+            )
+        action_costs = \
+            -edge_quad_weights[..., 0] -edge_quad_weights[..., 1] + \
+            edge_quad_weights[..., 2] + edge_quad_weights[..., 3]
+        best_action_idx = torch.argmin(action_costs, dim=1)
+        best_edges = tour_indices[torch.arange(b), best_action_idx]
+        u = best_edges[:, 1].numpy()
+        v = best_edges[:, 2].numpy()
+        x = best_edges[:, 4].numpy()
+        y = best_edges[:, 5].numpy()
+
+        # I think?
+        e1 = np.stack([u, v], axis=1)
+        e2 = np.stack([x, y], axis=1)
+        return e1, e2
+
+    def policy(self, states):
         """
-        run this with provided experiences to run one step of optimization
+        run this with provided state to get action
         """
-        pass
+        states = [state[0] for state in states]
+        actions = []
+        e0s, e1s = self._make_greedy_move(states)
+        for e0, e1 in zip(e0s, e1s):
+            action = {'terminate': False, 'e0': e0, 'e1': e1}
+            actions.append(action)
+        return actions
+
+    def agent_start(self, state):
+        return self.policy(state)
+
+    def agent_step(self, reward, state):
+        return self.policy(state)
 
 
 class ActionNetRunner:
