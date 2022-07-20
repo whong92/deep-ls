@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
 import copy
-from abc import ABC
+from typing import Optional
 
 from gym import Env
 
@@ -81,7 +81,14 @@ def perform_swap(tour_nodes: np.array, i, k, adj):
 
 
 class TSP2OptState:
-    def __init__(self, nodes_coord: np.ndarray, edge_weights: np.ndarray, init_tour: np.ndarray, opt_tour_len: int):
+    def __init__(
+        self,
+        nodes_coord: np.ndarray,
+        edge_weights: np.ndarray,
+        init_tour: np.ndarray,
+        opt_tour_len: int,
+        opt_tour: Optional[np.ndarray] = None
+    ):
         self.num_nodes = nodes_coord.shape[0]
         self.nodes_coord = nodes_coord
         self.edge_weights = edge_weights
@@ -91,12 +98,13 @@ class TSP2OptState:
         self.tour_adj = tour_nodes_to_W(self.tour_nodes)
         self.tour_len = tour_nodes_to_tour_len(self.tour_nodes, edge_weights)
         self.opt_tour_len = opt_tour_len
+        self.opt_tour = opt_tour
 
     def apply_move(self, e1: np.ndarray, e2: np.ndarray):
         i, j = e1
         k, l = e2
 
-        assert self.tour_adj[i, j] == 1 and self.tour_adj[k, l] == 1
+        assert self.tour_adj[i, j] == 1 and self.tour_adj[k, l] == 1, f"{i}, {j}, {k}, {l}, {self.tour_nodes}"
         assert self.tour_adj[j, i] == 1 and self.tour_adj[l, k] == 1
         pos_i = self.nodes_pos[i]
         pos_j = self.nodes_pos[j]
@@ -186,9 +194,20 @@ class TSP2OptEnvBase(Env):
     def init(self):
         self.cur_step = -1
 
-    def _set_instance_to_state(self, instance, init_tour):
+    def set_instance_as_state(self, instance, init_tour, ret_opt_tour: bool = False):
         b = instance
-        self.state = TSP2OptState(b['nodes_coord'][0], b['edges_values'][0], init_tour, opt_tour_len=b['tour_len'][0])
+        self.set_state(
+            TSP2OptState(
+                b['nodes_coord'][0],
+                b['edges_values'][0],
+                init_tour,
+                opt_tour_len=b['tour_len'][0],
+                opt_tour=b['tour_nodes'][0]
+            )
+        )
+
+    def set_state(self, state):
+        self.state = copy.deepcopy(state)
         self.best_state = copy.deepcopy(self.state)
         self.cur_step = 0
         self.done = False
@@ -242,6 +261,7 @@ class TSP2OptEnv(TSP2OptEnvBase):
         shuffle_data=True,
         ret_best_state=True,
         ret_log_tour_len=False,
+        ret_opt_tour=False,
         seed=42
     ):
         super().__init__(
@@ -254,6 +274,7 @@ class TSP2OptEnv(TSP2OptEnvBase):
         self.data_f = data_f
         self.shuffle_data = shuffle_data
         self.seed = seed
+        self.ret_opt_tour = ret_opt_tour
         self.init()
 
     def init(self):
@@ -275,7 +296,7 @@ class TSP2OptEnv(TSP2OptEnvBase):
 
         b = self.cur_instance
         tour_nodes = np.arange(len(b['nodes_coord'][0]), dtype=int)  # greedy_search(b['nodes_coord'][0])
-        self._set_instance_to_state(b, tour_nodes)
+        self.set_instance_as_state(b, tour_nodes, ret_opt_tour=self.ret_opt_tour)
 
     def render(self, mode="human"):
         self.state.render(mode)
@@ -296,6 +317,7 @@ class TSP2OptMultiEnv(Env):
         shuffle_data=True,
         ret_best_state=True,
         ret_log_tour_len=False,
+        ret_opt_tour=False,
         num_samples_per_batch=1,
         same_instance_per_batch=True,
         seed=42
@@ -317,6 +339,7 @@ class TSP2OptMultiEnv(Env):
         assert num_samples_per_batch > 0
         self.num_samples_per_batch = num_samples_per_batch
         self.same_instance_per_batch = same_instance_per_batch
+        self.ret_opt_tour = ret_opt_tour
         self.init()
 
     def init(self):
@@ -351,7 +374,7 @@ class TSP2OptMultiEnv(Env):
         for env, instance in zip(self.envs, self.cur_instances):
             b = instance
             tour_nodes = np.random.permutation(len(b['nodes_coord'][0]))
-            env._set_instance_to_state(b, tour_nodes)
+            env.set_instance_as_state(b, tour_nodes, ret_opt_tour=self.ret_opt_tour)
 
     def get_state(self):
         return [
