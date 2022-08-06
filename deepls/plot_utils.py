@@ -1,7 +1,3 @@
-import torch
-import torch.nn.functional as F
-
-import matplotlib
 import matplotlib.pyplot as plt
 import networkx as nx
 
@@ -35,19 +31,19 @@ def plot_tsp(p, x_coord, W, W_val, W_target, title="default"):
                     pairs.append((r, c))
         return pairs
     
-    G = nx.from_numpy_matrix(W_val)
+    G: nx.Graph = nx.from_numpy_matrix(W_val)
     pos = dict(zip(range(len(x_coord)), x_coord.tolist()))
     adj_pairs = _edges_to_node_pairs(W)
     target_pairs = _edges_to_node_pairs(W_target)
     colors = ['g'] + ['b'] * (len(x_coord) - 1)  # Green for 0th node, blue for others
     nx.draw_networkx_nodes(G, pos, node_color=colors, node_size=50)
-    nx.draw_networkx_edges(G, pos, edgelist=adj_pairs, alpha=0.15, width=0.5)
+    nx.draw_networkx_edges(G, pos, edgelist=adj_pairs, alpha=0.15, width=0.25)
     nx.draw_networkx_edges(G, pos, edgelist=target_pairs, alpha=1, width=2, edge_color='r')
     p.set_title(title)
     return p
 
 
-def plot_tsp_heatmap(p, x_coord, W_val, W_pred, title="default", thres=0.25):
+def plot_tsp_heatmap(p, x_coord, W_val, W_pred, W=None, title="default", thres=0.25):
     """
     Helper function to plot predicted TSP tours with edge strength denoting confidence of prediction.
     
@@ -63,7 +59,7 @@ def plot_tsp_heatmap(p, x_coord, W_val, W_pred, title="default", thres=0.25):
     
     """
 
-    def _edges_to_node_pairs(W):
+    def _edges_to_node_pairs(W, thres=thres):
         """Helper function to convert edge matrix into pairs of adjacent nodes.
         """
         pairs = []
@@ -75,12 +71,15 @@ def plot_tsp_heatmap(p, x_coord, W_val, W_pred, title="default", thres=0.25):
                     edge_preds.append(W[r][c])
         return pairs, edge_preds
         
-    G = nx.from_numpy_matrix(W_val)
+    G: nx.Graph = nx.from_numpy_matrix(W_val)
     pos = dict(zip(range(len(x_coord)), x_coord.tolist()))
     node_pairs, edge_color = _edges_to_node_pairs(W_pred)
     node_color = ['g'] + ['b'] * (len(x_coord) - 1)  # Green for 0th node, blue for others
     nx.draw_networkx_nodes(G, pos, node_color=node_color, node_size=50)
-    nx.draw_networkx_edges(G, pos, edgelist=node_pairs, edge_color=edge_color, edge_cmap=plt.cm.Reds, width=0.75)
+    nx.draw_networkx_edges(G, pos, edgelist=node_pairs, edge_color=edge_color, edge_cmap=plt.cm.Reds, width=2, alpha=0.8)
+    if W is not None:
+        adj_pairs, _ = _edges_to_node_pairs(W, thres=0.0)
+        nx.draw_networkx_edges(G, pos, edgelist=adj_pairs, alpha=0.15, width=0.25)
     p.set_title(title)
     return p
 
