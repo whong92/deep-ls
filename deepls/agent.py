@@ -619,7 +619,9 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
         }
         torch.save(bla, path)
 
-    def load(self, path, init_config=True):
+    def load(self, path, init_config=True, device=None):
+        if device is not None:
+            self.device = device
         bla = torch.load(path, map_location=self.device)
         agent_config = bla['agent_config']
         agent_config['device'] = self.device
