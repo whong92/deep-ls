@@ -8,7 +8,7 @@ from tqdm import tqdm
 from deepls.TSP2OptEnv import TSP2OptMultiEnv
 from deepls.agent import AverageStateRewardBaselineAgent
 from deepls.solver import greedy_postproc
-
+import json
 
 TSP_SIZE_TO_TEST_DATA_F = {
     10: 'tsp10_test_concorde.txt',
@@ -26,7 +26,8 @@ def moving_average(arr, c=100):
 
 
 def run_experiment(
-    experiment_config
+    experiment_config,
+    ckpt_every=20
 ):
     data_root = experiment_config['data_root']
 
@@ -47,14 +48,26 @@ def run_experiment(
         data_f=f'{data_root}/{TSP_SIZE_TO_TEST_DATA_F[problem_sz]}',
         num_samples_per_batch=num_samples_per_batch,
         same_instance_per_batch=True,
-        shuffle_data=True,
+        shuffle_data=False,
         ret_log_tour_len=False
     )
     env.reset()
 
     agent = AverageStateRewardBaselineAgent()
-    if model_ckpt is not None:
-        agent.load(model_ckpt, init_config=True, device=device)
+    assert model_ckpt is not None
+    agent.load(model_ckpt, init_config=True, device=device)
+
+    res_out_pth = os.path.join(
+        os.path.dirname(model_ckpt),
+        f'res_test_{problem_sz}_nodes.txt'
+    )
+    n_instance_ckpt = 0
+    if not os.path.exists(res_out_pth):
+        with open(res_out_pth, 'w') as fp:
+            pass
+    else:
+        with open(res_out_pth, 'r') as fp:
+            n_instance_ckpt = len(fp.readlines())
 
     all_opt_gaps = []
     all_opt_gaps_pre = []
@@ -64,16 +77,16 @@ def run_experiment(
     agent.set_eval()
     agent.set_greedy(False)
 
-    for _ in tqdm(range(num_instance_eval)):
-
+    for instance in tqdm(range(num_instance_eval)):
+        if instance < n_instance_ckpt:
+            continue
         tour_lens = []
         opts = []
         opt_gaps_pre = []
         opt_gaps = []
 
-        pbar = tqdm(range(num_samples_per_batch // eval_batch_size))
         env.reset(fetch_next=True)
-        for episode in pbar:
+        for episode in range(num_samples_per_batch // eval_batch_size):
             env.reset(fetch_next=False)
             states = env.get_state()
             actions = agent.agent_start(states)
@@ -98,10 +111,35 @@ def run_experiment(
                     break
                 else:
                     actions = agent.agent_step(rewards, states)
+
         all_opt_gaps.append(opt_gaps)
         all_opt_gaps_pre.append(opt_gaps_pre)
         all_tour_lens.append(tour_lens)
         all_opts.append(opts)
+
+        if ((instance + 1) % ckpt_every == 0) or ((instance + 1) == num_instance_eval):
+            with open(res_out_pth, 'a') as fp:
+                lines = []
+                for (_opt_gaps, _opt_gaps_pre, _tour_lens, _opts) in \
+                        zip(all_opt_gaps, all_opt_gaps_pre, all_tour_lens, all_opts):
+                    lines.append(json.dumps({
+                        'opt_gaps': _opt_gaps,
+                        'opt_gaps_pre': _opt_gaps_pre,
+                        'tour_lens': _tour_lens,
+                        'opts': _opts
+                    }) + '\n')
+                fp.writelines(lines)
+
+            all_opt_gaps = []
+            all_opt_gaps_pre = []
+            all_tour_lens = []
+            all_opts = []
+
+    with open(res_out_pth, 'r') as fp:
+        lines = fp.readlines()
+        lines = [json.loads(line) for line in lines]
+        all_opt_gaps = [line['opt_gaps'] for line in lines]
+        all_opt_gaps_pre = [line['opt_gaps_pre'] for line in lines]
 
     best_opt_gaps = np.min(all_opt_gaps, axis=1)
     best_opt_gaps_pre = np.min(all_opt_gaps_pre, axis=1)
@@ -127,11 +165,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     experiment_config = {
-        'problem_sz': 20,
-        'num_samples_per_batch': 1,
+        'problem_sz': 100,
+        'num_samples_per_batch': 100,
         'num_instance_eval': 100,
-        'eval_batch_size': 12,
-        'num_greedy_postproc_steps': 10,
+        'eval_batch_size': 100,
+        'num_greedy_postproc_steps': 100,
         'data_root': args.dataroot,
         'model_ckpt': args.ckptpath,
         'device': 'cuda'
