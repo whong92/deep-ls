@@ -3,7 +3,7 @@ import copy
 import numpy as np
 import torch
 from collections import OrderedDict
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Tuple
 
 from deepls.gcn_model import model_input_from_states, TSPRGCNValueNet, TSPRGCNActionNet, TSPRGCNLogNormalValueNet, get_edge_quad_embs
 from deepls.graph_utils import tour_nodes_to_W
@@ -391,7 +391,7 @@ class ActionNetRunner:
         self.net = net
         self.device = device
 
-    def policy(self, states):
+    def policy(self, states: List[Tuple[TSP2OptState, TSP2OptState]]):
         """
         :param states: sequence of tuple of 2 TSP2OptEnv states - the current state and the best state so far
         :return:
@@ -400,7 +400,7 @@ class ActionNetRunner:
             the list of experiences which is given in e.g. get_action_pref method
         """
         best_states = [state[1] for state in states]
-        states = [state[0] for state in states]
+        states: List[TSP2OptState] = [state[0] for state in states]
         # cur state
         x_edges, x_edges_values, x_nodes_coord, x_tour = list(model_input_from_states(states))
         # best_state
@@ -472,16 +472,17 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
         }
         torch.save(bla, path)
 
-    def load(self, path, init_config=True):
+    def load(self, path, load_optim=True, init_config=True):
         bla = torch.load(path, map_location=self.device)
         agent_config = bla['agent_config']
         agent_config['device'] = self.device
         if init_config:
             self.agent_init(agent_config)
-        self.net.load_state_dict(bla['net'])
-        self.critic_baseline.load_state_dict(bla['critic'])
-        self.optimizer.load_state_dict(bla['optimizer'])
-        self.critic_optimizer.load_state_dict(bla['critic_optimizer'])
+        self.net.load_state_dict(bla['net'], strict=False)
+        self.critic_baseline.load_state_dict(bla['critic'], strict=False)
+        if load_optim:
+            self.optimizer.load_state_dict(bla['optimizer'])
+            self.critic_optimizer.load_state_dict(bla['critic_optimizer'])
 
     def _agent_init(self, agent_config):
         self.agent_config = copy.deepcopy(agent_config)
@@ -619,7 +620,7 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
         }
         torch.save(bla, path)
 
-    def load(self, path, init_config=True, device=None):
+    def load(self, path, init_config=True, load_optim=True, device=None):
         if device is not None:
             self.device = device
         bla = torch.load(path, map_location=self.device)
@@ -627,8 +628,9 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
         agent_config['device'] = self.device
         if init_config:
             self.agent_init(agent_config)
-        self.net.load_state_dict(bla['net'])
-        self.optimizer.load_state_dict(bla['optimizer'])
+        self.net.load_state_dict(bla['net'], strict=False)
+        if load_optim:
+            self.optimizer.load_state_dict(bla['optimizer'])
 
     def _agent_init(self, agent_config):
         self.agent_config = copy.deepcopy(agent_config)

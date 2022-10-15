@@ -160,7 +160,7 @@ def get_edge_quad_embs(e_emb, x_tour, x_tour_directed):
     :param x_tour: b x v x v - binary tour adjacency mat
     :param x_tour_directed: b x v x v - binary directed tour adjacency mat
     :return:
-    action_quad - quadruplet embeddings of each 2opt action, [emb(u, v), emb(x, y), emb(u, x), emb(v, y)] - (b, n_edge_pairs, 4)
+    action_quad - quadruplet embeddings of each 2opt action, [emb(u, v), emb(x, y), emb(u, x), emb(v, y)] - (b, n_edge_pairs, 4 * emb_size)
     tour_indices_cat - the edges of the 2opt action (u, v), (x, y) - (b, n_edge_pairs, 6)
     """
     b, v, _, _ = e_emb.shape
@@ -253,13 +253,30 @@ class TSPRGCNActionNet(nn.Module):
         config['num_edge_cat_features'] = 2
         self.rgcn = ResidualGatedGCNModel(config)
         self.hidden_dim = config['hidden_dim']
-        self.pre_action_net = MLP(input_dim=self.hidden_dim * 4, hidden_dim=self.hidden_dim, output_dim=self.hidden_dim,
-                                  L=0)
+        self.action_cost_linear = MLP(
+            input_dim=1,
+            hidden_dim=self.hidden_dim,
+            output_dim=self.hidden_dim,
+            L=0
+        )
+        self.pre_action_net = MLP(
+            input_dim=self.hidden_dim * 5,
+            hidden_dim=self.hidden_dim,
+            output_dim=self.hidden_dim,
+            L=0
+        )
         self.action_net = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=1, L=3)
         self.greedy = False
 
-    def compute_state_tour_embeddings(self, x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour,
-                                      x_tour_directed):
+    def compute_state_tour_embeddings(
+        self,
+        x_edges,
+        x_edges_values,
+        x_nodes_coord,
+        x_tour,
+        x_best_tour,
+        x_tour_directed
+    ):
         x_cat = torch.stack([x_tour, x_best_tour], dim=3)
         # action 0
         x_emb, e_emb = self.rgcn(x_cat, x_edges_values, x_nodes_coord)
@@ -271,7 +288,15 @@ class TSPRGCNActionNet(nn.Module):
         # set greedy decoding
         self.greedy = greedy
 
-    def forward(self, x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, x_tour_directed):
+    def forward(
+        self,
+        x_edges,
+        x_edges_values,
+        x_nodes_coord,
+        x_tour,
+        x_best_tour,
+        x_tour_directed
+    ):
         """
         x_edges: b x v x v
         x_edges_values: b x v x v
@@ -282,13 +307,27 @@ class TSPRGCNActionNet(nn.Module):
         """
         b, _, _ = x_edges.shape
         tour_logits, tour_indices_cat = self.get_tour_logits(
-            x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, x_tour_directed
+            x_edges,
+            x_edges_values,
+            x_nodes_coord,
+            x_tour,
+            x_best_tour,
+            x_tour_directed
         )
         actions, edges, pi = sample_tour_logit(tour_logits.squeeze(-1), tour_indices_cat, greedy=self.greedy)
 
         return edges.reshape(b, 2, 3), pi, actions
 
-    def get_action_pref(self, x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, actions, x_tour_directed):
+    def get_action_pref(
+        self,
+        x_edges,
+        x_edges_values,
+        x_nodes_coord,
+        x_tour,
+        x_best_tour,
+        actions,
+        x_tour_directed
+    ):
         """
         x_edges: b x v x v
         x_edges_values: b x v x v
@@ -298,17 +337,58 @@ class TSPRGCNActionNet(nn.Module):
         """
         b, _, _ = x_edges.shape
         tour_logits, tour_indices_cat = self.get_tour_logits(
-            x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, x_tour_directed
+            x_edges,
+            x_edges_values,
+            x_nodes_coord,
+            x_tour,
+            x_best_tour,
+            x_tour_directed
         )
         actions, edges, pi = sample_tour_logit(tour_logits.squeeze(-1), tour_indices_cat, actions=actions)
 
         return edges.reshape(b, 2, 3), pi, actions
 
-    def get_tour_logits(self, x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, x_tour_directed):
-        tour_emb_cat, tour_indices_cat = self.compute_state_tour_embeddings(
-            x_edges, x_edges_values, x_nodes_coord,
-            x_tour, x_best_tour, x_tour_directed
+    def compute_action_cost_emb(
+        self,
+        x_edges_values,
+        x_tour,
+        x_tour_directed,
+    ):
+        edge_quad_values, _ = get_edge_quad_embs(
+            x_edges_values.unsqueeze(3),
+            x_tour,
+            x_tour_directed
         )
-        tour_emb_cat = self.pre_action_net(tour_emb_cat)
-        tour_logits = self.action_net(tour_emb_cat)
+        action_cost = \
+            edge_quad_values[..., 2] + edge_quad_values[..., 3] \
+            - edge_quad_values[..., 0] - edge_quad_values[..., 1]
+        action_cost_emb = self.action_cost_linear(action_cost.unsqueeze(2))
+        return action_cost_emb
+
+    def get_tour_logits(
+        self,
+        x_edges,
+        x_edges_values,
+        x_nodes_coord,
+        x_tour,
+        x_best_tour,
+        x_tour_directed
+    ):
+        tour_emb_cat, tour_indices_cat = self.compute_state_tour_embeddings(
+            x_edges,
+            x_edges_values,
+            x_nodes_coord,
+            x_tour,
+            x_best_tour,
+            x_tour_directed
+        )
+        b, n_edge_pairs, _ = tour_emb_cat.shape
+        action_cost_emb = self.compute_action_cost_emb(
+            x_edges_values,
+            x_tour,
+            x_tour_directed,
+        )
+        state_emb = torch.cat((tour_emb_cat, action_cost_emb), dim=2)
+        state_emb = self.pre_action_net(state_emb)
+        tour_logits = self.action_net(state_emb)
         return tour_logits, tour_indices_cat

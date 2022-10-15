@@ -33,7 +33,8 @@ def test_tsp_rgcn(dummy_config):
     ], dim=0)
 
     batch_size, num_nodes, _ = x_edges.shape
-    edges_sampled, pis, _ = net(x_edges, x_edges_values, x_nodes_coord, x_tour, x_tour, x_tour_directed)
+    x_cur_step = torch.ones(len(states), 1, dtype=torch.float)
+    edges_sampled, pis, _ = net(x_edges, x_edges_values, x_nodes_coord, x_tour, x_tour, x_tour_directed, x_cur_step)
     assert edges_sampled.shape == torch.Size([batch_size, 2, 3])
     assert pis.shape == torch.Size([batch_size])
 
