@@ -5,7 +5,8 @@ import torch
 from collections import OrderedDict
 from typing import Optional, Any, List, Tuple
 
-from deepls.gcn_model import model_input_from_states, TSPRGCNValueNet, TSPRGCNActionNet, TSPRGCNLogNormalValueNet, get_edge_quad_embs
+from deepls.tsp_gcn_model import model_input_from_states, get_edge_quad_embs, TSPRGCNValueNet, TSPRGCNLogNormalValueNet, \
+    TSPRGCNActionNet
 from deepls.graph_utils import tour_nodes_to_W
 from deepls.TSP2OptEnv import TSP2OptState
 from torch.optim import Adam
@@ -444,10 +445,14 @@ class ActionNetRunner:
         x_best_tour = torch.cat([c[4] for c in cached_inputs], dim=0)[perm]
         x_tour_directed = torch.cat([c[5] for c in cached_inputs], dim=0)[perm]
         actions = torch.cat([e['cache']['action'] for e in experiences], dim=0)[perm]
+        h_sa_old = torch.cat([e['cache']['action_pref'] for e in experiences], dim=0)[perm]
 
         model_inputs = [x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, actions, x_tour_directed]
         _, h_sa, _ = self.net.get_action_pref(*[t.clone().to(self.device) for t in model_inputs])
-        return h_sa
+        return h_sa, h_sa_old.to(self.device)
+
+
+PPO_EPS = 0.2
 
 
 class GRCNCriticBaselineAgent(REINFORCEAgent):
@@ -522,6 +527,7 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
         self.policy_optimize_every = agent_config['policy_optimize_every']
         self.critic_optimize_every = agent_config['critic_optimize_every']
         self.minibatch_size = agent_config['minibatch_sz']
+        self.use_ppo_update = agent_config.get('use_ppo_update', False)
         self.greedy = False
 
     def compute_baseline_and_loss(self, experiences, perm, returns):
@@ -585,12 +591,19 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
                     with torch.no_grad():
                         minibatch_baseline, critic_loss = self.compute_baseline_and_loss(experiences, minibatch_perm, _returns)
 
-            # TODO: use this to deal with accumulating gradients
             if optimize_policy:
-                h_sa = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
-                eligibility_loss = -h_sa  # NLL loss
+                h_sa, h_sa_old = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
                 td_err = minibatch_returns.clone().to(self.device) - minibatch_baseline.detach()
-                policy_loss = (td_err.to(self.device) * eligibility_loss).mean()  # TODO: discounting!(?)
+                if self.use_ppo_update:
+                    # PPO update
+                    ratio = torch.exp(h_sa - h_sa_old)
+                    policy_loss_p1 = -td_err * ratio
+                    policy_loss_p2 = -td_err * torch.clip(ratio, 1. - PPO_EPS, 1. + PPO_EPS)
+                    policy_loss = torch.maximum(policy_loss_p1, policy_loss_p2).mean() * weight
+                else:
+                    # regular PG update
+                    eligibility_loss = -h_sa  # NLL loss
+                    policy_loss = (td_err * eligibility_loss).mean() * weight
                 policy_loss.backward()
 
             self.critic_loss_val = critic_loss.detach().to('cpu')
@@ -652,6 +665,7 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
 
         self.policy_optimize_every = agent_config['policy_optimize_every']
         self.minibatch_size = agent_config['minibatch_sz']
+        self.use_ppo_update = agent_config.get('use_ppo_update', False)
         self.greedy = False
 
     def compute_baseline(self, experiences, perm):
@@ -688,10 +702,20 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
             self.optimizer.zero_grad()
             for (minibatch_perm, minibatch_returns, minibatch_baseline), weight in \
                     iter_over_tensor_minibatch(perm, returns, baseline, minibatch_size=self.minibatch_size):
-                h_sa = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
-                eligibility_loss = -h_sa  # NLL loss
+                h_sa, h_sa_old = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
                 td_err = (minibatch_returns.clone() - minibatch_baseline.detach()).to(self.device)
-                policy_loss = (td_err.to(self.device) * eligibility_loss).mean() * weight  # TODO: discounting!(?)
+
+                if self.use_ppo_update:
+                    # PPO update
+                    ratio = torch.exp(h_sa - h_sa_old)
+                    policy_loss_p1 = -td_err * ratio
+                    policy_loss_p2 = -td_err * torch.clip(ratio, 1. - PPO_EPS, 1. + PPO_EPS)
+                    policy_loss = torch.maximum(policy_loss_p1, policy_loss_p2).mean() * weight
+                else:
+                    # regular PG update
+                    eligibility_loss = -h_sa  # NLL loss
+                    policy_loss = (td_err * eligibility_loss).mean() * weight  # TODO: discounting!(?)
+
                 policy_loss.backward()
             self.optimizer.step()
 

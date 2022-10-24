@@ -138,6 +138,9 @@ if __name__ == "__main__":
         # after how many episodes do we optimize policy / critic?
         'policy_optimize_every': 1,
         'critic_optimize_every': 1,
+        # this doesn't work well - PPO's lower bound surrogate loss isn't as effective as the exact PG loss
+        # we don't have a convergence issue anyways, so this was purely for intellectual interest
+        'use_ppo_update': False,
         # architecture settings
         'model': {
             "voc_edges_in": 3,
@@ -151,7 +154,7 @@ if __name__ == "__main__":
         },
         # optimizer settings
         'optim': {
-            'step_size': 1e-5,
+            'step_size': 1e-6,
             'beta_m': 0.9,
             'beta_v': 0.999,
             'epsilon': 1e-8

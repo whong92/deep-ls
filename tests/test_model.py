@@ -1,5 +1,5 @@
 import pytest
-from deepls.gcn_model import TSPRGCNActionNet, model_input_from_states, sample_tour_logit, get_edge_quad_embs
+from deepls.tsp_gcn_model import model_input_from_states, sample_tour_logit, get_edge_quad_embs, TSPRGCNActionNet
 from tests.test_env import _make_random_state
 from deepls.TSP2OptEnv import TSP2OptState
 from deepls.graph_utils import tour_nodes_to_W
