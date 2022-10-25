@@ -46,8 +46,8 @@ def run_experiment(
         max_num_steps=problem_sz,
         num_nodes=problem_sz,
         data_f=f'{data_root}/{TSP_SIZE_TO_TEST_DATA_F[problem_sz]}',
-        num_samples_per_batch=num_samples_per_batch,
-        same_instance_per_batch=True,
+        num_samples_per_instance=num_samples_per_batch,
+        num_instance_per_batch=1,
         shuffle_data=False,
         ret_log_tour_len=False
     )

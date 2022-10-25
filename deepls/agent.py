@@ -1,6 +1,7 @@
 from abc import ABCMeta, abstractmethod
 import copy
 import numpy as np
+import pandas as pd
 import torch
 from collections import OrderedDict
 from typing import Optional, Any, List, Tuple
@@ -293,9 +294,11 @@ class REINFORCEAgent(BaseAgent):
                 dims=[0]
             )  # num_steps x batch_size
             for ret, step in zip(returns, experience):
+                state_ids = np.array([state[0].id for state in step['state']])
+                df = pd.DataFrame({'state_ids': state_ids, 'returns': ret.numpy()})
+                avg_ret = np.array(df.groupby('state_ids', as_index=False).returns.transform(np.mean).returns)
                 step['cache']['return'] = ret
-                step['cache']['average_return'] = torch.mean(ret) * torch.ones_like(ret)
-
+                step['cache']['average_return'] = torch.as_tensor(avg_ret)
             # Perform replay steps:
             experiences_dict = self.replay_buffer.sample_experience(self.replay_buffer.get_size())
             self.agent_optimize(experiences_dict)
