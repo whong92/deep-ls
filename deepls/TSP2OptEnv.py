@@ -87,7 +87,8 @@ class TSP2OptState:
         edge_weights: np.ndarray,
         init_tour: np.ndarray,
         opt_tour_len: int,
-        opt_tour: Optional[np.ndarray] = None
+        opt_tour: Optional[np.ndarray] = None,
+        id: Optional[int] = None
     ):
         self.num_nodes = nodes_coord.shape[0]
         self.nodes_coord = nodes_coord
@@ -99,6 +100,7 @@ class TSP2OptState:
         self.tour_len = tour_nodes_to_tour_len(self.tour_nodes, edge_weights)
         self.opt_tour_len = opt_tour_len
         self.opt_tour = opt_tour
+        self.id = id
 
     def apply_move(self, e1: np.ndarray, e2: np.ndarray):
         i, j = e1
@@ -131,7 +133,6 @@ class TSP2OptState:
                 pos_k, pos_l = pos_l, pos_k
 
         if pos_k < pos_i:
-            i, j, k, l = k, l, i, j
             pos_i, pos_j, pos_k, pos_l = pos_k, pos_l, pos_i, pos_j
 
         N = self.num_nodes
@@ -194,23 +195,44 @@ class TSP2OptEnvBase(Env):
     def init(self):
         self.cur_step = -1
 
-    def set_instance_as_state(self, instance, init_tour, ret_opt_tour: bool = False):
-        b = instance
-        self.set_state(
-            TSP2OptState(
-                b['nodes_coord'][0],
-                b['edges_values'][0],
-                init_tour,
-                opt_tour_len=b['tour_len'][0],
-                opt_tour=b['tour_nodes'][0]
-            )
+    def _make_state_from_batch_and_tour(self, b, tour, id):
+        return TSP2OptState(
+            b['nodes_coord'][0],
+            b['edges_values'][0],
+            tour,
+            opt_tour_len=b['tour_len'][0],
+            opt_tour=b['tour_nodes'][0],
+            id=id
         )
 
-    def set_state(self, state):
+    def set_instance_as_state(
+        self,
+        instance,
+        init_tour,
+        best_tour=None,
+        id: Optional[int] = None,
+        max_num_steps: Optional[int] = None,
+        ret_opt_tour: bool = False
+    ):
+        b = instance
+        state = self._make_state_from_batch_and_tour(b, init_tour, id)
+        best_state = None
+        if best_tour is not None:
+            best_state = self._make_state_from_batch_and_tour(b, best_tour, id)
+        self.set_state(
+            state=state,
+            best_state=best_state,
+            max_num_steps=max_num_steps
+        )
+
+    def set_state(self, state, best_state=None, max_num_steps: Optional[int] = None):
         self.state = copy.deepcopy(state)
-        self.best_state = copy.deepcopy(self.state)
+        self.best_state = copy.deepcopy(self.state) if best_state is None else best_state
         self.cur_step = 0
         self.done = False
+        # option to reset the episode len
+        if max_num_steps is not None:
+            self.max_num_steps = max_num_steps
 
     def get_state(self):
         if self.ret_best_state:
@@ -229,7 +251,6 @@ class TSP2OptEnvBase(Env):
         if self.cur_step == self.max_num_steps:
             self.done = True
 
-        # TODO: work on reward shaping, experiment with other reward schemes
         if self.done:
             # TODO: make a terminal state??
             # if the action given in t-1 was terminate, or cur_step == T
@@ -275,6 +296,7 @@ class TSP2OptEnv(TSP2OptEnvBase):
         self.shuffle_data = shuffle_data
         self.seed = seed
         self.ret_opt_tour = ret_opt_tour
+        self.last_instance_id = -1
         self.init()
 
     def init(self):
@@ -285,18 +307,42 @@ class TSP2OptEnv(TSP2OptEnvBase):
         self.cur_instance = None
         self.rng = np.random.default_rng(self.seed)
 
-    def reset(self, fetch_next=True):
+    def reset_episode(self):
+        """
+        similar to reset(), but does not resample the node tour - re-uses the state from last episode, never fetches
+        new instance
+        :return:
+        """
+        self.set_instance_as_state(
+            self.cur_instance,
+            self.state.tour_nodes,
+            best_tour=self.best_state.tour_nodes,
+            id=self.state.id,
+            ret_opt_tour=self.ret_opt_tour
+        )
+
+    def get_next_instance(self):
+        # get a new batch from TSPReader and initialize the state
+        try:
+            instance = next(self.reader_iter)
+        except StopIteration as e:
+            self.reader_iter = self.reader.__iter__()
+            instance = next(self.reader_iter)
+        self.last_instance_id += 1
+        return instance
+
+    def reset(self, fetch_next=True, max_num_steps=None):
+        """
+        resets the *run* - fetches a new instance (if fetch_next=True), and resamples a node tour from random
+        :param fetch_next:
+        :return:
+        """
         if fetch_next or self.cur_instance is None:
-            # get a new batch from TSPReader and initialize the state
-            try:
-                self.cur_instance = next(self.reader_iter)
-            except StopIteration as e:
-                self.reader_iter = self.reader.__iter__()
-                self.cur_instance = next(self.reader_iter)
+            self.cur_instance = self.get_next_instance()
 
         b = self.cur_instance
         tour_nodes = np.arange(len(b['nodes_coord'][0]), dtype=int)  # greedy_search(b['nodes_coord'][0])
-        self.set_instance_as_state(b, tour_nodes, ret_opt_tour=self.ret_opt_tour)
+        self.set_instance_as_state(b, tour_nodes, ret_opt_tour=self.ret_opt_tour, max_num_steps=max_num_steps)
 
     def render(self, mode="human"):
         self.state.render(mode)
@@ -318,12 +364,12 @@ class TSP2OptMultiEnv(Env):
         ret_best_state=True,
         ret_log_tour_len=False,
         ret_opt_tour=False,
-        num_samples_per_batch=1,
-        same_instance_per_batch=True,
+        num_samples_per_instance=1,
+        num_instance_per_batch=True,
         seed=42
     ):
         self.envs = []
-        for _ in range(num_samples_per_batch):
+        for _ in range(num_samples_per_instance * num_instance_per_batch):
             self.envs.append(
                 TSP2OptEnvBase(
                     max_num_steps=max_num_steps,
@@ -336,9 +382,10 @@ class TSP2OptMultiEnv(Env):
         self.data_f = data_f
         self.shuffle_data = shuffle_data
         self.seed = seed
-        assert num_samples_per_batch > 0
-        self.num_samples_per_batch = num_samples_per_batch
-        self.same_instance_per_batch = same_instance_per_batch
+        assert num_samples_per_instance > 0
+        self.num_samples_per_instance = num_samples_per_instance
+        self.num_instance_per_batch = num_instance_per_batch
+        self.last_instance_id = -1
         self.ret_opt_tour = ret_opt_tour
         self.init()
 
@@ -347,34 +394,76 @@ class TSP2OptMultiEnv(Env):
             env.init()
         self.reader = GoogleTSPReader(self.num_nodes, -1, 1, self.data_f, shuffle_data=self.shuffle_data)
         self.reader_iter = self.reader.__iter__()
-        self.cur_instances = [None for _ in range(self.num_samples_per_batch)]
+        self.cur_instances = [None for _ in range(self.num_samples_per_instance)]
+        self.cur_instance_ids = [None for _ in range(self.num_samples_per_instance)]
         self.rng = np.random.default_rng(self.seed)
 
-    def reset(self, fetch_next=True):
-
-        def try_fetch_next_instance():
-            try:
-                instance = next(self.reader_iter)
-            except StopIteration as e:
-                self.reader_iter = self.reader.__iter__()
-                instance = next(self.reader_iter)
-            return instance
-
-        if fetch_next or self.cur_instances[0] is None:
-            instances = [try_fetch_next_instance()]
-            for i in range(1, self.num_samples_per_batch):
-                # fetch new one only if we use multiple instances
-                if not self.same_instance_per_batch:
-                    instance = try_fetch_next_instance()
-                else:
-                    instance = copy.deepcopy(instances[-1])
-                instances.append(instance)
-            self.cur_instances = instances
-
+    def reset_episode(self):
+        """
+        similar to reset(), but does not resample the node tour - re-uses the state from last episode, never fetches
+        new instance
+        :return:
+        """
         for env, instance in zip(self.envs, self.cur_instances):
             b = instance
+            tour_nodes = env.state.tour_nodes
+            env.set_instance_as_state(
+                b,
+                tour_nodes,
+                best_tour=env.best_state.tour_nodes,
+                id=env.state.id,
+                ret_opt_tour=self.ret_opt_tour
+            )
+
+    def get_next_instance(self):
+        # get a new batch from TSPReader and initialize the state
+        try:
+            instance = next(self.reader_iter)
+        except StopIteration as e:
+            self.reader_iter = self.reader.__iter__()
+            instance = next(self.reader_iter)
+        self.last_instance_id += 1
+        return instance
+
+    def reset(self, fetch_next=True, max_num_steps=None):
+        """
+        resets the *run* - fetches a new instance (if fetch_next=True), and resamples a node tour from random
+        :param fetch_next:
+        :return:
+        """
+
+        if fetch_next or self.cur_instances[0] is None:
+            instances = []
+            instance_ids = []
+            for i in range(self.num_instance_per_batch):
+                instances.append(self.get_next_instance())
+                instance_ids.append(self.last_instance_id)
+                for j in range(1, self.num_samples_per_instance):
+                    instances.append(copy.deepcopy(instances[-1]))
+                    instance_ids.append(instance_ids[-1])
+            self.cur_instances = instances
+            self.cur_instance_ids = instance_ids
+
+            # instances = [try_fetch_next_instance()]
+            # for i in range(1, self.num_samples_per_instance):
+            #     # fetch new one only if we use multiple instances
+            #     if not self.num_instance_per_batch:
+            #         instance = try_fetch_next_instance()
+            #     else:
+            #         instance = copy.deepcopy(instances[-1])
+            #     instances.append(instance)
+            # self.cur_instances = instances
+
+        for env, instance, instance_id in zip(self.envs, self.cur_instances, self.cur_instance_ids):
+            b = instance
             tour_nodes = np.random.permutation(len(b['nodes_coord'][0]))
-            env.set_instance_as_state(b, tour_nodes, ret_opt_tour=self.ret_opt_tour)
+            env.set_instance_as_state(
+                b,
+                tour_nodes,
+                id=instance_id,
+                ret_opt_tour=self.ret_opt_tour,
+                max_num_steps=max_num_steps
+            )
 
     def get_state(self):
         return [
