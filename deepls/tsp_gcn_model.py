@@ -106,8 +106,8 @@ def get_edge_quad_embs(e_emb, x_tour, x_tour_directed):
     tour_indices_cat - the edges of the 2opt action (u, v), (x, y) - (b, n_edge_pairs, 6)
     """
     b, v, _, _ = e_emb.shape
-    tour_indices = torch.nonzero(x_tour)
-    tour_indices = tour_indices[tour_indices[:, 1] < tour_indices[:, 2]]
+    tour_indices = torch.nonzero(x_tour_directed)
+    # tour_indices = tour_indices[tour_indices[:, 1] < tour_indices[:, 2]]
     tour_indices = tour_indices.reshape(b, v, -1)  # b x v x 3 - last dim is (b, u, v)
     tour_indices_cat = torch.cat([
         tour_indices.unsqueeze(2).repeat(1, 1, v, 1),
@@ -117,7 +117,7 @@ def get_edge_quad_embs(e_emb, x_tour, x_tour_directed):
     rs, cs = torch.triu_indices(v, v, offset=1)
     tour_indices_cat = tour_indices_cat[:, rs, cs, :]  # b x v x 6 - last dim is (b, u, v, b, x, y)
 
-    x_tour_directed = x_tour_directed.bool()
+    # x_tour_directed = x_tour_directed.bool()
     b, n_edge_pairs, _ = tour_indices_cat.shape
     bs = tour_indices_cat[:, :, 0].reshape(-1)
     us = tour_indices_cat[:, :, 1].reshape(-1)
@@ -125,8 +125,8 @@ def get_edge_quad_embs(e_emb, x_tour, x_tour_directed):
     xs = tour_indices_cat[:, :, 4].reshape(-1)
     ys = tour_indices_cat[:, :, 5].reshape(-1)
     # normalize the edges so they always point forward in the tour, this way there is a unique (u, v) and (x, y)
-    us, vs = normalize_edges_tour(x_tour_directed, bs, us, vs)
-    xs, ys = normalize_edges_tour(x_tour_directed, bs, xs, ys)
+    # us, vs = normalize_edges_tour(x_tour_directed, bs, us, vs)
+    # xs, ys = normalize_edges_tour(x_tour_directed, bs, xs, ys)
 
     orig_pair_emb = torch.cat([e_emb[bs, us, vs, :], e_emb[bs, xs, ys, :]], dim=1)
     new_pair_emb = torch.cat([e_emb[bs, us, xs, :], e_emb[bs, vs, ys, :]], dim=1)

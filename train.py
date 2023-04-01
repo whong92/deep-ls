@@ -61,7 +61,6 @@ class RunSched:
         self.cum_episode_sched = np.cumsum(
             np.array(self.runs[1:] + [float("inf")]) * np.array(self.run_lens)
         )
-        print(self.cum_episode_sched)
 
     def get_schedule(self, cur_run):
         for run, next_run, episode_len, run_len in \
@@ -140,7 +139,6 @@ def run_experiment(
                     agent.agent_end(rewards)
                     # if end of epoch
                     if run.is_end:
-                        print(' ------- ', episode)
                         if agent.critic_abs_err is not None:
                             ve_error.append(torch.mean(agent.critic_abs_err).detach())
                         else:
@@ -207,7 +205,7 @@ if __name__ == "__main__":
         },
         # optimizer settings
         'optim': {
-            'step_size': 1e-5,
+            'step_size': 1e-6,
             'beta_m': 0.9,
             'beta_v': 0.999,
             'epsilon': 1e-8
@@ -216,19 +214,30 @@ if __name__ == "__main__":
     }
 
     experiment_config = {
-        'problem_sz': 20,
-        'experiment_name': 'test',
-        'model_ckpt': None,
+        'problem_sz': 100,
+        'experiment_name': '100-nodes-chunked-episodes',
+        'model_ckpt': '/content/drive/MyDrive/colab_data/deep-ls/100-nodes-chunked-episodes/model-02500-val-0.098.ckpt',
         'num_samples_per_instance': 12,
         'val_every': 500,
-        'start_episode': 0,
-        'train_episodes': 20000,
+        'start_episode': 2500,
+        'train_episodes': 7500,
         # schedule for 20 nodes
         'run_sched': {
             'runs': [0, 5000, 10000, 15000],
             'episode_lens': [4, 8, 20, 40],
             'run_lens': [5, 5, 2, 2],
         },
+        # schedule for 50 nodes (after 20 node pretrain)
+        # 'run_sched': {
+        #     'runs': [0, 2500, 5000, 7500],
+        #     'episode_lens': [10, 25, 25, 50],
+        #     'run_lens': [5, 2, 4, 4],
+        # },
+        # 'run_sched': {
+        #     'runs': [0, 2500, 5000, 7500],
+        #     'episode_lens': [25, 50, 50, 100],
+        #     'run_lens': [4, 2, 4, 2],
+        # },
         'agent_config': agent_config,
         'model_root': args.modelroot,
         'data_root': args.dataroot

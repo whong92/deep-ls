@@ -715,10 +715,10 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
                     policy_loss_p2 = -td_err * torch.clip(ratio, 1. - PPO_EPS, 1. + PPO_EPS)
                     policy_loss = torch.maximum(policy_loss_p1, policy_loss_p2).mean() * weight
                 else:
+                    print(" ============== ")
                     # regular PG update
                     eligibility_loss = -h_sa  # NLL loss
                     policy_loss = (td_err * eligibility_loss).mean() * weight  # TODO: discounting!(?)
-
                 policy_loss.backward()
             self.optimizer.step()
 
