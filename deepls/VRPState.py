@@ -1,11 +1,13 @@
 import numpy as np
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Any, Union
+import random
 
+import pandas as pd
 import torch
 
 import os, sys
 from sklearn.metrics.pairwise import euclidean_distances
-from graph_utils import tour_nodes_to_tour_len
+from deepls.graph_utils import tour_nodes_to_tour_len
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 print(sys.path)
@@ -50,6 +52,13 @@ def enumerate_all_tours_edges(
     return all_tours_edges, W
 
 
+def enumerate_all_tours_nodes(tours: Dict[int, np.ndarray]) -> Dict[int, np.ndarray]:
+    all_tours_nodes = {}
+    for tour_idx, tour in tours.items():
+        all_tours_nodes[tour_idx] = tour
+    return all_tours_nodes
+
+
 def enumerate_tour_edges(nodes: np.ndarray, directed=False):
     N = len(nodes)
     assert N > 0
@@ -84,7 +93,6 @@ def enumerate_2_opt_neighborhood(tours_edges_directed: Dict[int, np.ndarray]):
         ], axis=2)  # T x T x 4 - last dim is u, v, x, y
         # indices of a T x T matrix where j > i so we don't take duplicate pairs
         rs, cs = np.triu_indices(T, k=1)
-        # TODO: also filter out adjacent edges?
         tour_edges_pairs = tour_edges_pairs[rs, cs, :]
         tour_edges_pairs = np.concatenate(
             (
@@ -138,6 +146,118 @@ def enumerate_cross_heuristic_neighborhood(tours_edges_directed_dict: Dict[int, 
     return neighborhood
 
 
+def enumerate_relocate_neighborhood_given(
+    src_node: int,
+    src_tour_idx: int,
+    src_node_pos: int,
+    tours_edges_directed: Dict[int, np.ndarray],
+    # node_pos: Dict[int, int]
+):
+    neighborhood = []
+    tour_edges = tours_edges_directed[src_tour_idx]
+    # src_node_pos = src_node_pos[src_node]
+    src_node = np.array([src_node])  # 1,
+
+    in_edge = tour_edges[src_node_pos - 1]
+    out_edge = tour_edges[src_node_pos]
+    src_edges = np.concatenate([in_edge, out_edge], axis=0)  # 4
+    dst_edge = np.array([[0, -1]])  # dst_w
+    # relocate to depot move
+    node_edges_pairs = np.concatenate([
+        src_node[None, :],  # 1, 1
+        src_edges[None, :],  # 1, 4
+        dst_edge  # 1, 2
+    ], axis=1)  # 1, 7
+    neighborhood.append({
+        'src_tour': src_tour_idx,
+        'dst_tour': None,
+        'node_edges_pairs': node_edges_pairs
+    })
+
+    # relocate to other tour move
+    for dst_edges_idx, dst_edges in tours_edges_directed.items():
+        if src_tour_idx == dst_edges_idx:
+            continue
+        T_dst = dst_edges.shape[0]
+        node_edges_pairs = np.concatenate([
+            np.tile(src_node[None, :], (T_dst, 1)),  # T_dst, 1
+            np.tile(src_edges[None, :], (T_dst, 1)),  # T_dst, 4
+            dst_edges[:, :]  # T_dst, 2
+        ], axis=1)
+        neighborhood.append({
+            'src_tour': src_tour_idx,
+            'dst_tour': dst_edges_idx,
+            'node_edges_pairs': node_edges_pairs
+        })
+
+    return neighborhood
+
+
+def enumerate_2_opt_neighborhood_given(
+    tour_idx: int,
+    src_edge: np.ndarray,  # 2
+    tour_edges_directed: Dict[int, np.ndarray]
+):
+    tour_edges = tour_edges_directed[tour_idx]  # T, 2
+
+    exclude = np.logical_or(
+        np.any(tour_edges == src_edge[1], axis=1),
+        np.any(tour_edges == src_edge[0], axis=1)
+    )
+    tour_edges = tour_edges[~exclude]
+    if len(tour_edges) == 0:
+        tour_edges_pairs = np.empty(shape=(0, 8))
+    else:
+        T, _ = tour_edges.shape
+        src_edge = np.tile(src_edge[None, :], (T, 1))
+        tour_edges_pairs = np.concatenate([
+            src_edge,
+            tour_edges[:, :]  # (T, 2)
+        ], axis=1)  # T, 4
+        # print(tour_edges_pairs)
+        tour_edges_pairs = np.concatenate(
+            (
+                tour_edges_pairs,
+                tour_edges_pairs[:, [0, 2, 1, 3]],  # u, x, v, y
+            ),
+            axis=1
+        )
+    return [{
+        'tour_idx': tour_idx,
+        'tour_edges_pairs': tour_edges_pairs # last dim is uvxy, uxvy
+    }]
+
+
+def enumerate_cross_neighborhood_given(
+    src_tour: int,
+    src_tour_edge: np.ndarray,  # 2
+    tours_edges_directed: Dict[int, np.ndarray]
+):
+    neighborhood = []
+    for dst_tour, dst_tour_edges in tours_edges_directed.items():
+        if dst_tour == src_tour:
+            continue
+        T_dst = dst_tour_edges.shape[0]
+        tour_edges_pairs = np.concatenate([
+            np.tile(src_tour_edge[None, :], (T_dst, 1)),  # T_dst x 2
+            dst_tour_edges[:, :]    # T_dst x 2
+        ], axis=1)  # T_dst x 4 - last dim is u, v, x, y
+        tour_edges_pairs = np.concatenate(
+            (
+                tour_edges_pairs,
+                tour_edges_pairs[:, [0, 2, 1, 3]],  # u, x, v, y
+                tour_edges_pairs[:, [0, 3, 1, 2]],  # u, y, v, x
+            ),
+            axis=1
+        )  # T_dst x ((uvxy), (uxvy), (uyvx))
+        neighborhood.append({
+            'src_tour': src_tour,
+            'dst_tour': dst_tour,
+            'tour_edges_pairs': tour_edges_pairs
+        })
+    return neighborhood
+
+
 def enumerate_relocate_neighborhood(tours: Dict[int, np.ndarray], tours_edges_directed: Dict[int, np.ndarray]):
     neighborhood = []
     # for src_tour_idx, (src_tour, src_edges) in enumerate(zip(tours, tours_edges_directed)):
@@ -151,14 +271,14 @@ def enumerate_relocate_neighborhood(tours: Dict[int, np.ndarray], tours_edges_di
         src_edges_cat = np.concatenate([
             src_edges[0:-1],  # inbound edges
             src_edges[1:],  # outbound edges
-        ], axis=1)
+        ], axis=1)  # T_src, 4
         assert np.all(src_edges_cat[:, 1] == src_nodes) and np.all(src_edges_cat[:, 2] == src_nodes)
 
         # relocate to depot move
         node_edges_pairs = np.concatenate([
-            np.tile(src_nodes[:, None, None], (1, 1, 1)),
-            np.tile(src_edges_cat[:, None, :], (1, 1, 1)),
-            np.tile(np.array([[[0, -1]]]), (T_src, 1, 1))
+            np.tile(src_nodes[:, None, None], (1, 1, 1)),  #  T_src, 1, 1
+            np.tile(src_edges_cat[:, None, :], (1, 1, 1)),  # T_src, 1, 4
+            np.tile(np.array([[[0, -1]]]), (T_src, 1, 1))  # T_src, 1, 2
         ], axis=2)
         node_edges_pairs = np.reshape(node_edges_pairs, (-1, 7))
         neighborhood.append({
@@ -174,9 +294,9 @@ def enumerate_relocate_neighborhood(tours: Dict[int, np.ndarray], tours_edges_di
                 continue
             T_dst = dst_edges.shape[0]
             node_edges_pairs = np.concatenate([
-                np.tile(src_nodes[:, None, None], (1, T_dst, 1)),
-                np.tile(src_edges_cat[:, None, :], (1, T_dst, 1)),
-                np.tile(dst_edges[None, :, :], (T_src, 1, 1))
+                np.tile(src_nodes[:, None, None], (1, T_dst, 1)),  # T_src, T_dst, 1
+                np.tile(src_edges_cat[:, None, :], (1, T_dst, 1)),  # T_src, T_dst, 1
+                np.tile(dst_edges[None, :, :], (T_src, 1, 1))  # T_src, T_dst, 1
             ], axis=2)
             node_edges_pairs = np.reshape(node_edges_pairs, (-1, 7))
 
@@ -257,7 +377,7 @@ def perform_swap_2_opt_new(tour_nodes, u, v, x, y):
     u, v, x, y here are positions, not node labels
     :return:
     """
-    assert u < v < x < y
+    assert u < v < x < y, f"{u} < {v}, {x}, {y}"
     assert v == u+1
     assert y == x+1
     x1 = tour_nodes[:u+1]
@@ -266,7 +386,6 @@ def perform_swap_2_opt_new(tour_nodes, u, v, x, y):
     return np.concatenate((x1, x2[::-1], x3))
 
 
-from typing import Dict
 def apply_cross_move(
     tour_0: np.ndarray,
     node_pos_0: Dict[int, int],
@@ -354,20 +473,22 @@ def apply_relocate_move(
 
 
 class VRPState:
+
     def __init__(
         self,
         nodes_coord: np.ndarray,  # depot is always node 0,
         node_demands: np.ndarray,
-        max_tour_demand: float,
+        max_tour_demand: Optional[float] = None,
         tours_init: Optional[List[np.ndarray]] = None,
         id = None
     ):
         self.nodes_coord = nodes_coord
         self.edge_weights = euclidean_distances(nodes_coord)
         self.node_demands = node_demands
-        self.max_tour_demand = max_tour_demand
+        self.max_tour_demand = max_tour_demand if max_tour_demand else np.sum(node_demands)
         self.N = len(self.nodes_coord) - 1
-        self.id =id
+        self.id = id
+
         if tours_init:
             assert sum([len(tour) for tour in tours_init]) == self.N
             assert np.all(
@@ -523,6 +644,7 @@ class VRPState:
             'node_pos': new_node_pos,
             'cum_dems': tour_nodes_to_cum_demands(new_tour_nodes, self.node_demands)
         }
+        # no need to update tour_idx here
 
     def _apply_relocate_move(
         self,
@@ -534,7 +656,7 @@ class VRPState:
         dst_w
     ):
         # move relocates to empty tour, create new dst_tour
-        if dst_tour_idx is None:
+        if dst_tour_idx == -1:
             dst_tour_idx = max(self.tours.keys()) + 1
             dst_tour = {
                 'tour': np.array([0, -1]),
@@ -567,6 +689,7 @@ class VRPState:
                 'node_pos': src_tour_nodes_pos_new,
                 'cum_dems': tour_nodes_to_cum_demands(src_tour_nodes_new, self.node_demands)
             }
+            # this shouldn't be neccessary but paranoid
         else:
             assert np.all(src_tour_nodes_new == np.array([0, -1])), "just double checking"
 
@@ -577,7 +700,7 @@ class VRPState:
         }
 
     def make_nbh(self):
-        return VRPNbH(self)
+        return VRPNbHAutoReg(self)
 
     def get_nbh(self):
         return self.nbh
@@ -595,9 +718,9 @@ def normalize_edge(e, as_tuple=True):
     return e
 
 
-def get_normalized_nbh_rep(src_edges: List[np.ndarray], dst_edges: List[np.ndarray]):
-    src_edges = filter(lambda e: e[0] != e[1], [normalize_edge(e) for e in src_edges])
-    dst_edges = filter(lambda e: e[0] != e[1], [normalize_edge(e) for e in dst_edges])
+def get_normalized_nbh_rep(_src_edges: List[np.ndarray], _dst_edges: List[np.ndarray]):
+    src_edges = list(filter(lambda e: e[0] != e[1], [normalize_edge(e) for e in _src_edges]))
+    dst_edges = list(filter(lambda e: e[0] != e[1], [normalize_edge(e) for e in _dst_edges]))
     src_edges = set(src_edges)
     dst_edges = set(dst_edges)
     edges_added = list(src_edges.difference(dst_edges))
@@ -668,154 +791,222 @@ def check_relocate_move_valid(
     return (dst_demand + src_demand) <= max_tour_dem
 
 
-class VRPNbH:
+def normalize_edges(edges: np.array):
+    """
+    assume edges of the shape ... x 2 where last axis is u, v
+    :param edges:
+    :return:
+    """
+    edges_norm = edges.copy()
+    edges_norm[edges_norm == -1] = 0
+    edges_norm = np.sort(edges_norm, axis=-1)
+    return edges_norm
 
+
+def flatten_deduplicate_reloc_nbh(
+    reloc_nbhs: List[Dict[str, Union[np.ndarray, int]]],
+    state: VRPState
+):
+    reloc_nbhs_dict = {}
+    for nbh in reloc_nbhs:
+        tour0 = nbh['src_tour']
+        tour1 = nbh['dst_tour']
+        node_edge_pairs = nbh['node_edges_pairs']
+        for node_edge_pair in node_edge_pairs:
+            src_node = node_edge_pair[0]
+            src_u = node_edge_pair[1:3]
+            src_v = node_edge_pair[3:5]
+            dst_w = node_edge_pair[5:7]
+            src_edges = [src_u, src_v, dst_w]
+            dst_edges = [
+                np.array([src_u[0], src_v[1]]),
+                np.array([dst_w[0], src_node]),
+                np.array([src_node, dst_w[1]]),
+            ]
+            nbh_norm = get_normalized_nbh_rep(src_edges, dst_edges)
+            e_add, e_rem = nbh_norm
+            no_op = len(set(e_add).symmetric_difference(set(e_rem))) == 0
+
+            if (tour1 is not None) and (not check_relocate_move_valid(
+                    src_node,
+                    state.tours[tour1]['cum_dems'],
+                    state.node_demands,
+                    max_tour_dem=state.max_tour_demand
+            )):
+                continue
+
+            # remove no_ops and duplicates
+            if not no_op and (nbh_norm not in reloc_nbhs_dict):
+                nb = {
+                    "nb_type": "reloc",
+                    "tour0": tour0,
+                    "tour1": tour1 if tour1 is not None else -1,
+                    "src_node": src_node,
+                    "src_u": src_u,
+                    "src_v": src_v,
+                    "dst_w": dst_w,
+                    "dst_wp": dst_edges[0],
+                    "src_up": dst_edges[1],
+                    "src_vp": dst_edges[2],
+                }
+                reloc_nbhs_dict[nbh_norm] = nb
+    return reloc_nbhs_dict
+
+
+def flatten_deduplicate_cross_nbh(
+    cross_nbhs: List[Dict[str, Union[np.ndarray, int]]],
+    state: VRPState
+):
+    cross_nbh_dict = {}
+    for nbh in cross_nbhs:
+        tour0 = nbh['src_tour']
+        tour1 = nbh['dst_tour']
+        edge_pairs = nbh['tour_edges_pairs']
+
+        cum_dem_0 = state.tours[tour0]['cum_dems']
+        cum_dem_1 = state.tours[tour1]['cum_dems']
+
+        for edge_pair in edge_pairs:
+            # first move
+            e0 = edge_pair[0:2]
+            e1 = edge_pair[2:4]
+            e0p = edge_pair[4:6]
+            e1p = edge_pair[6:8]
+            nbh_norm = get_normalized_nbh_rep([e0, e1], [e0p, e1p])
+
+            e_add, e_rem = nbh_norm
+            no_op = len(set(e_add).symmetric_difference(set(e_rem))) == 0
+            # remove no_ops and duplicates
+            if (
+                    not no_op and
+                    (nbh_norm not in cross_nbh_dict) and
+                    check_cross_move_valid(e0, e1, e0p, e1p, cum_dem_0, cum_dem_1, state.max_tour_demand)
+            ):
+                nb = {
+                    "nb_type": "cross",
+                    "tour0": tour0,
+                    "tour1": tour1,
+                    "e0": e0,
+                    "e1": e1,
+                    "e0p": e0p,
+                    "e1p": e1p,
+                }
+                cross_nbh_dict[nbh_norm] = nb
+            # second move
+            e0p = edge_pair[8:10]
+            e1p = edge_pair[10:12]
+            nbh_norm = get_normalized_nbh_rep([e0, e1], [e0p, e1p])
+
+            e_add, e_rem = nbh_norm
+            no_op = len(set(e_add).symmetric_difference(set(e_rem))) == 0
+            # remove no_ops and duplicates
+            if (
+                    not no_op and
+                    (nbh_norm not in cross_nbh_dict) and
+                    check_cross_move_valid(e0, e1, e0p, e1p, cum_dem_0, cum_dem_1, state.max_tour_demand)
+            ):
+                nb = {
+                    "nb_type": "cross",
+                    "tour0": tour0,
+                    "tour1": tour1,
+                    "e0": e0,
+                    "e1": e1,
+                    "e0p": e0p,
+                    "e1p": e1p,
+                }
+                cross_nbh_dict[nbh_norm] = nb
+
+    return cross_nbh_dict
+
+
+def flatten_deduplicate_2opt_nbh(
+    twoopt_nbhs: List[Dict[str, Union[np.ndarray, int]]],
+):
+    two_opt_nbh_dict = {}
+    for nbh in twoopt_nbhs:
+        tour_idx = nbh['tour_idx']
+        tour_edges_pairs = nbh['tour_edges_pairs']
+        for tour_edge_pair in tour_edges_pairs:
+            e0 = tour_edge_pair[:2]
+            e1 = tour_edge_pair[2:4]
+            e0p = tour_edge_pair[4:6]
+            e1p = tour_edge_pair[6:8]
+            nbh_norm = get_normalized_nbh_rep([e0, e1], [e0p, e1p])
+            e_add, e_rem = nbh_norm
+            no_op = len(set(e_add).symmetric_difference(set(e_rem))) == 0
+            # remove no_ops and duplicates
+            if not no_op and (nbh_norm not in two_opt_nbh_dict):
+                nb = {
+                    "nb_type": "2opt",
+                    "tour_idx": tour_idx,
+                    "e0": tour_edge_pair[:2],
+                    "e1": tour_edge_pair[2:4],
+                    "e0p": e0p,
+                    "e1p": e1p
+                }
+                two_opt_nbh_dict[nbh_norm] = nb
+
+    return two_opt_nbh_dict
+
+
+class VRPNbH:
     @staticmethod
     def enumerate_all_nbs(state: VRPState):
         # relocation heuristic
         tour_edges, _ = enumerate_all_tours_edges(
             state.tour_idx_to_tour(), directed=True
         )
-        nbhs = enumerate_relocate_neighborhood(state.tour_idx_to_tour(), tour_edges)
-        relocate_nbhs = {}
-        for nbh in nbhs:
-            tour0 = nbh['src_tour']
-            tour1 = nbh['dst_tour']
-            node_edge_pairs = nbh['node_edges_pairs']
-            for node_edge_pair in node_edge_pairs:
-                src_node = node_edge_pair[0]
-                src_u = node_edge_pair[1:3]
-                src_v = node_edge_pair[3:5]
-                dst_w = node_edge_pair[5:7]
-                src_edges = [src_u, src_v, dst_w]
-                dst_edges = [
-                    np.array([src_u[0], src_v[1]]),
-                    np.array([dst_w[0], src_node]),
-                    np.array([src_node, dst_w[1]]),
-                ]
-                nbh_norm = get_normalized_nbh_rep(src_edges, dst_edges)
-                no_op = len(nbh_norm) == 0
-
-                if (tour1 is not None) and (not check_relocate_move_valid(
-                        src_node,
-                        state.tours[tour1]['cum_dems'],
-                        state.node_demands,
-                        max_tour_dem=state.max_tour_demand
-                )):
-                    continue
-
-                # remove no_ops and duplicates
-                if not no_op and (nbh_norm not in relocate_nbhs):
-                    nb = {
-                        "nb_type": "reloc",
-                        "tour0": tour0,
-                        "tour1": tour1,
-                        "src_node": src_node,
-                        "src_u": src_u,
-                        "src_v": src_v,
-                        "dst_w": dst_w,
-                        "dst_wp": dst_edges[0],
-                        "src_up": dst_edges[1],
-                        "src_vp": dst_edges[2]
-                    }
-                    relocate_nbhs[nbh_norm] = nb
+        reloc_nbhs = enumerate_relocate_neighborhood(state.tour_idx_to_tour(), tour_edges)
+        reloc_nbhs_dict = flatten_deduplicate_reloc_nbh(reloc_nbhs, state)
 
         # cross heuristic
-        nbhs = enumerate_cross_heuristic_neighborhood(tour_edges)
-        cross_h_nbhs = {}
-        for nbh in nbhs:
-            tour0 = nbh['src_tour']
-            tour1 = nbh['dst_tour']
-            edge_pairs = nbh['tour_edges_pairs']
+        cross_nbhs = enumerate_cross_heuristic_neighborhood(tour_edges)
 
-            cum_dem_0 = state.tours[tour0]['cum_dems']
-            cum_dem_1 = state.tours[tour1]['cum_dems']
-
-            for edge_pair in edge_pairs:
-                # first move
-                e0 = edge_pair[0:2]
-                e1 = edge_pair[2:4]
-                e0p = edge_pair[4:6]
-                e1p = edge_pair[6:8]
-                nbh_norm = get_normalized_nbh_rep([e0, e1], [e0p, e1p])
-
-                # print(cum_dem_0, e0)
-                # print(cum_dem_1, e1)
-                no_op = len(nbh_norm) == 0
-                # remove no_ops and duplicates
-                if not no_op and (nbh_norm not in cross_h_nbhs) and check_cross_move_valid(e0, e1, e0p, e1p, cum_dem_0,
-                                                                                           cum_dem_1,
-                                                                                           state.max_tour_demand):
-                    nb = {
-                        "nb_type": "cross",
-                        "tour0": tour0,
-                        "tour1": tour1,
-                        "e0": e0,
-                        "e1": e1,
-                        "e0p": e0p,
-                        "e1p": e1p,
-                    }
-                    cross_h_nbhs[nbh_norm] = nb
-                # second move
-                e0p = edge_pair[8:10]
-                e1p = edge_pair[10:12]
-                nbh_norm = get_normalized_nbh_rep([e0, e1], [e0p, e1p])
-
-                # print(cum_dem_0, e0)
-                # print(cum_dem_1, e1)
-                no_op = len(nbh_norm) == 0
-                # remove no_ops and duplicates
-                if not no_op and (nbh_norm not in cross_h_nbhs) and check_cross_move_valid(e0, e1, e0p, e1p, cum_dem_0,
-                                                                                           cum_dem_1,
-                                                                                           state.max_tour_demand):
-                    nb = {
-                        "nb_type": "cross",
-                        "tour0": tour0,
-                        "tour1": tour1,
-                        "e0": e0,
-                        "e1": e1,
-                        "e0p": e0p,
-                        "e1p": e1p,
-                    }
-                    cross_h_nbhs[nbh_norm] = nb
+        cross_nbh_dict = flatten_deduplicate_cross_nbh(cross_nbhs, state)
 
         # 2opt heuristics
-        nbhs = enumerate_2_opt_neighborhood(tour_edges)
-        two_opt_nbhs = {}
-        for nbh in nbhs:
-            tour_idx = nbh['tour_idx']
-            tour_edges_pairs = nbh['tour_edges_pairs']
-            for tour_edge_pair in tour_edges_pairs:
-                e0 = tour_edge_pair[:2]
-                e1 = tour_edge_pair[2:4]
-                e0p = tour_edge_pair[4:6]
-                e1p = tour_edge_pair[6:8]
-                nbh_norm = get_normalized_nbh_rep([e0, e1], [e0p, e1p])
-                no_op = len(nbh_norm) == 0
-                # remove no_ops and duplicates
-                if not no_op and (nbh_norm not in cross_h_nbhs):
-                    nb = {
-                        "nb_type": "2opt",
-                        "tour_idx": tour_idx,
-                        "e0": tour_edge_pair[:2],
-                        "e1": tour_edge_pair[2:4],
-                        "e0p": e0p,
-                        "e1p": e1p
-                    }
-                    two_opt_nbhs[nbh_norm] = nb
+        twoopt_nbhs = enumerate_2_opt_neighborhood(tour_edges)
+
+        two_opt_nbh_dict = flatten_deduplicate_2opt_nbh(twoopt_nbhs)
 
         # figure out how to make repeatable sequence generation
         nbh_list = []
-        relocate_nbhs = list(relocate_nbhs.values())
-        cross_h_nbhs = list(cross_h_nbhs.values())
-        two_opt_nbhs = list(two_opt_nbhs.values())
-        nbh_list.extend(relocate_nbhs)
-        nbh_list.extend(cross_h_nbhs)
-        nbh_list.extend(two_opt_nbhs)
-        return nbh_list, relocate_nbhs, cross_h_nbhs, two_opt_nbhs
+        num_moves_lim = 30
+        reloc_nbhs_dict = list(reloc_nbhs_dict.values())
+        bla = 0
+        bla += len(reloc_nbhs_dict)
+        if len(reloc_nbhs_dict) > num_moves_lim:
+            perm = np.random.choice(len(reloc_nbhs_dict), num_moves_lim)
+            reloc_nbhs_dict = [reloc_nbhs_dict[p] for p in perm]
+
+
+        cross_nbh_dict = list(cross_nbh_dict.values())
+        bla += len(cross_nbh_dict)
+        if len(cross_nbh_dict) > num_moves_lim:
+            perm = np.random.choice(len(cross_nbh_dict), num_moves_lim)
+            cross_nbh_dict = [cross_nbh_dict[p] for p in perm]
+
+        two_opt_nbh_dict = list(two_opt_nbh_dict.values())
+        bla += len(two_opt_nbh_dict)
+        # print(bla)
+        if len(two_opt_nbh_dict) > num_moves_lim:
+            perm = np.random.choice(len(two_opt_nbh_dict), num_moves_lim)
+            two_opt_nbh_dict = [two_opt_nbh_dict[p] for p in perm]
+        nbh_list.extend(reloc_nbhs_dict)
+        nbh_list.extend(cross_nbh_dict)
+        nbh_list.extend(two_opt_nbh_dict)
+
+        return nbh_list, reloc_nbhs_dict, cross_nbh_dict, two_opt_nbh_dict
 
     def __init__(self, state: VRPState):
         nbh_list, relocate_nbhs, cross_nbhs, two_opt_nbhs = VRPNbH.enumerate_all_nbs(state)
+        # at this point I should be passing the entire state in
+        self.tour_edges, _ = enumerate_all_tours_edges(
+            state.tour_idx_to_tour(), directed=True
+        )
+        self.tour_nodes = enumerate_all_tours_nodes(state.tour_idx_to_tour())
+        self.tours = state.tours
+
         self.nbh_list = nbh_list
         self.relocate_nbhs_vectorized = vectorize_reloc_moves(relocate_nbhs)
         self.cross_nbhs_vectorized = vectorize_cross_moves(cross_nbhs)
@@ -823,6 +1014,94 @@ class VRPNbH:
 
     def get_nb(self, i):
         return self.nbh_list[i]
+
+
+class VRPNbHAutoReg:
+    @staticmethod
+    def vectorize_moves(reloc_nbh=None, cross_nbh=None, twp_opt_nbh=None):
+        if reloc_nbh is None:
+            reloc_nbh = []
+        if cross_nbh is None:
+            cross_nbh = []
+        if twp_opt_nbh is None:
+            twp_opt_nbh = []
+
+        reloc_nbh_vect = vectorize_reloc_moves(reloc_nbh)
+        cross_nbh_vect = vectorize_cross_moves(cross_nbh)
+        twp_opt_nbh_vect = vectorize_twopt_moves(twp_opt_nbh)
+
+        return reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect
+
+    def _get_first_move_nbh(self):
+        first_move_nbh = []
+        edges_vect = []
+        nodes_vect = []
+        for tour_idx, tour_nodes in self.tour_nodes.items():
+            _tour_nodes = tour_nodes[1:-1]
+            nodes_vect.append(_tour_nodes)  # we don't want depot nodes here
+            first_move_nbh.extend(
+                [{'type': 'node', 'node': n, 'tour_idx': tour_idx} for n in _tour_nodes]
+            )
+        for tour_idx, tour_edges in self.tour_edges.items():
+            edges_vect.append(tour_edges)
+            first_move_nbh.extend(
+                [{'type': 'edge', 'edge': e, 'tour_idx': tour_idx} for e in tour_edges]
+            )
+
+        edges_vect = np.concatenate(edges_vect, axis=0)  # num_edges x 2
+        edges_vect = normalize_edges(edges_vect)
+        nodes_vect = np.concatenate(nodes_vect, axis=0)  # num_nodes
+
+        return edges_vect, nodes_vect, first_move_nbh
+
+    def _get_second_move_nbh(
+        self,
+        state: VRPState,
+        move_0,
+    ):
+        second_moves = []
+        if move_0['type'] == 'node':
+            node = move_0['node']
+            node_tour = move_0['tour_idx']
+            node_pos = self.tours[node_tour]['node_pos'][node]
+            reloc_nbh = enumerate_relocate_neighborhood_given(
+                node, node_tour, node_pos, self.tour_edges
+            )
+            reloc_nbh = flatten_deduplicate_reloc_nbh(reloc_nbh, state=state)
+            reloc_nbh = list(reloc_nbh.values())
+            second_moves = reloc_nbh
+
+            reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves(reloc_nbh, [], [])
+        elif move_0['type'] == 'edge':
+            edge = move_0['edge']
+            edge_tour = move_0['tour_idx']
+            cross_nbh = enumerate_cross_neighborhood_given(edge_tour, edge, self.tour_edges)
+            two_opt_nbh = enumerate_2_opt_neighborhood_given(edge_tour, edge, self.tour_edges)
+
+            cross_nbh = flatten_deduplicate_cross_nbh(cross_nbhs=cross_nbh, state=state)
+            two_opt_nbh = flatten_deduplicate_2opt_nbh(two_opt_nbh)
+
+            cross_nbh = list(cross_nbh.values())
+            two_opt_nbh = list(two_opt_nbh.values())
+
+            reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves([], cross_nbh, two_opt_nbh)
+            second_moves = cross_nbh + two_opt_nbh
+
+        return reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect, second_moves
+
+    def __init__(self, state: VRPState):
+        self.tour_edges, _ = enumerate_all_tours_edges(
+            state.tour_idx_to_tour(), directed=True
+        )
+        self.tour_nodes = enumerate_all_tours_nodes(state.tour_idx_to_tour())
+        self.tours = state.tours
+
+        self.edges_vect, self.nodes_vect, self.first_move_nbh = self._get_first_move_nbh()
+
+        self.reloc_nbh_vect = None
+        self.cross_nbh_vect = None
+        self.twp_opt_nbh_vect = None
+        self.second_moves = None
 
 
 def get_edge_embs(e_emb: torch.Tensor, edges: torch.Tensor, symmetric=True) -> torch.Tensor:
@@ -837,6 +1116,18 @@ def get_edge_embs(e_emb: torch.Tensor, edges: torch.Tensor, symmetric=True) -> t
     ret = e_emb[bs, us, vs]
     if symmetric:
         ret += e_emb[bs, vs, us]
+    return ret
+
+
+def get_node_embs(x_emb: torch.Tensor, nodes: torch.Tensor) -> torch.Tensor:
+    """
+    :param e_emb: b x v x v x h - edge embeddings
+    :param edges: ... x 3 - (batch_idx, u, v)
+    :return: ... x h
+    """
+    bs = nodes[..., 0]
+    us = nodes[..., 1]
+    ret = x_emb[bs, us]
     return ret
 
 
@@ -1017,6 +1308,420 @@ def embed_reloc_heuristic(reloc_moves_vectorized, edge_embeddings: torch.Tensor,
     reloc_move_embeddings = torch.split(reloc_move_embeddings, num_moves, dim=0)
     # cat it with 2opt and reloc
     return reloc_move_embeddings
+
+
+from gym import Env
+import copy
+import cloudpickle
+
+
+def worker(remote, parent_remote, env_fn):
+    parent_remote.close()
+    env: VRPEnvBase = env_fn()
+    env.init()
+    while True:
+        cmd, data = remote.recv()
+
+        if cmd == 'step':
+            action = data
+            ob, reward, done = env.step(action)
+            remote.send((ob, reward, done))
+
+        # elif cmd == 'reset':
+        #     remote.send(env.reset())
+
+        elif cmd == 'reset_episode':
+            instance, instance_id, max_num_steps = data
+            instance = {
+                'nodes_coord': env.state.nodes_coord, 'demands': env.state.node_demands
+            }
+            remote.send(env.set_instance_as_state(
+                instance=instance,
+                init_tour=env.state.all_tours_as_list(remove_last_depot=False),
+                best_tour=env.best_state.all_tours_as_list(remove_last_depot=False),
+                id=instance_id,
+                max_num_steps=max_num_steps
+            ))
+        
+        elif cmd == 'set_instance_run':
+            instance, instance_id, max_num_steps = data
+            remote.send(env.set_instance_as_state(
+                instance=instance,
+                init_tour=None,
+                best_tour=None,
+                id=instance_id,
+                max_num_steps=max_num_steps
+            ))
+
+        # elif cmd == 'render':
+        #     remote.send(env.render())
+
+        elif cmd == 'close':
+            remote.close()
+            break
+
+        else:
+            raise NotImplementedError
+
+
+import pickle
+from multiprocessing import Pipe, Process
+
+
+class CloudpickleWrapper(object):
+    def __init__(self, x):
+        self.x = x
+
+    def __getstate__(self):
+        return cloudpickle.dumps(self.x)
+
+    def __setstate__(self, ob):
+        self.x = pickle.loads(ob)
+
+    def __call__(self):
+        return self.x()
+
+
+def make_mp_envs(num_env, num_steps, max_tour_demand):
+    def make_env():
+        def fn():
+            env = VRPEnvBase(
+                max_num_steps=num_steps,
+                max_tour_demand=max_tour_demand
+            )
+            return env
+        return fn
+    return SubprocVecEnv([make_env() for i in range(num_env)])
+
+
+class SubprocVecEnv:
+    def __init__(self, env_fns):
+        self.waiting = False
+        self.closed = False
+        self.no_of_envs = len(env_fns)
+        self.remotes, self.work_remotes = \
+            zip(*[Pipe() for _ in range(self.no_of_envs)])
+        self.ps = []
+
+        for wrk, rem, fn in zip(self.work_remotes, self.remotes, env_fns):
+            proc = Process(target=worker,
+                           args=(wrk, rem, CloudpickleWrapper(fn)))
+            self.ps.append(proc)
+
+        for p in self.ps:
+            p.daemon = True
+            p.start()
+
+        for remote in self.work_remotes:
+            remote.close()
+
+    def step_async(self, actions):
+        if self.waiting:
+            raise Exception
+        self.waiting = True
+
+        for remote, action in zip(self.remotes, actions):
+            remote.send(('step', (action)))
+
+    def step_wait(self):
+        if not self.waiting:
+            raise Exception
+        self.waiting = False
+
+        results = [remote.recv() for remote in self.remotes]
+        obs, rews, dones = zip(*results)
+        return obs, rews, dones
+
+    def step(self, actions):
+        self.step_async(actions)
+        return self.step_wait()
+    
+    def set_instances_run(
+        self,
+        instances, instance_ids, max_num_stepss
+    ):
+        # print(instance_ids)
+        for remote, instance, instance_id, max_num_steps in \
+                zip(self.remotes, instances, instance_ids, max_num_stepss):
+            remote.send(('set_instance_run', (instance, instance_id, max_num_steps)))
+        return [remote.recv() for remote in self.remotes]
+    
+    def reset_episode(
+        self,
+    ):
+        """
+        resets the step counter (and starts a new episode),
+        but otherwise keeps the state exactly the same
+        :return:
+        """
+        for remote, instance, instance_id, max_num_steps in \
+                zip(self.remotes):
+            remote.send(('reset_episode', (None, )))
+        return [remote.recv() for remote in self.remotes]
+
+    def reset(self):
+        for remote in self.remotes:
+            remote.send(('reset', None))
+
+        return [remote.recv() for remote in self.remotes]
+
+    def close(self):
+        if self.closed:
+            return
+        if self.waiting:
+            for remote in self.remotes:
+                remote.recv()
+        for remote in self.remotes:
+            remote.send(('close', None))
+        for p in self.ps:
+            p.join()
+        self.closed = True
+
+
+class VRPEnvBase(Env):
+    def __init__(
+        self,
+        max_num_steps=50,
+        ret_best_state=True,
+        max_tour_demand=10.
+    ):
+        super(VRPEnvBase, self).__init__()
+        # config vars
+        self.max_num_steps = max_num_steps
+        self.ret_best_state = ret_best_state
+        self.max_tour_demand = max_tour_demand
+
+    def init(self):
+        self.cur_step = -1
+
+    def _make_state_from_batch_and_tour(self, b, init_tours, id):
+        return VRPState(
+            nodes_coord=b['nodes_coord'],
+            node_demands=b['demands'],
+            tours_init=init_tours,
+            max_tour_demand=self.max_tour_demand,
+            # opt_tour=b['tour_nodes'][0],  # TODO: optimal tour
+            id=id
+        )
+
+    def set_instance_as_state(
+        self,
+        instance,
+        init_tour=None,
+        best_tour=None,
+        id: Optional[int] = None,
+        max_num_steps: Optional[int] = None,
+        ret_opt_tour: bool = False
+    ):
+        b = instance
+        state = self._make_state_from_batch_and_tour(b, init_tour, id)
+        best_state = None
+        if best_tour is not None:
+            best_state = self._make_state_from_batch_and_tour(b, best_tour, id)
+        self.set_state(
+            state=state,
+            best_state=best_state,
+            max_num_steps=max_num_steps
+        )
+        return self.get_state()
+
+    def set_state(
+        self,
+        state: VRPState,
+        best_state: Optional[VRPState] = None,
+        max_num_steps: Optional[int] = None
+    ):
+        self.state = copy.deepcopy(state)
+        self.best_state = copy.deepcopy(self.state) if best_state is None else best_state
+        self.cur_step = 0
+        self.done = False
+        # option to reset the episode len
+        if max_num_steps is not None:
+            self.max_num_steps = max_num_steps
+
+    def get_state(self):
+        if self.ret_best_state:
+            return (self.state, self.best_state)
+        return self.state
+
+    def step(self, action: Dict):
+        if self.done:
+            return self.state, 0, self.done
+
+        self.cur_step += 1
+        if action['terminate']:
+            self.done = True
+
+        if self.cur_step == self.max_num_steps:
+            self.done = True
+
+        if self.done:
+            # if the action given in t-1 was terminate, or cur_step == T
+            # then the reward is cost(S[t-1])
+            reward = -self.best_state.get_cost(exclude_depot=False)
+        else:
+            move = action['move']
+            self.state.apply_move(move)
+            reward = 0.
+            if self.state.get_cost(exclude_depot=False) < self.best_state.get_cost(exclude_depot=False):
+                self.best_state = copy.deepcopy(self.state)
+
+        return self.get_state(), reward, self.done
+
+
+class VRPEnvRandom(VRPEnvBase):
+
+    def get_next_instance(self):
+        N = self.num_nodes
+        # get a new batch from TSPReader and initialize the state
+        demands = np.ones(shape=(N))
+        coords = np.zeros(shape=(N + 1, 2))
+        coords[0] = 0.5
+        coords[1:] = np.random.random(size=(N, 2))
+
+        instance = {
+            'nodes_coord': coords, 'demands': demands
+        }
+        self.last_instance_id += 1
+        return instance
+
+    def init(self):
+        super().init()
+        self.cur_instance = None
+        self.rng = np.random.default_rng(self.seed)
+
+    def __init__(
+        self,
+        num_nodes=10,
+        max_num_steps=10,
+        ret_best_state=True,
+        max_tour_demand=10.,
+        ret_opt_tour=False,
+        seed=42
+    ):
+        super().__init__(
+            max_num_steps=max_num_steps,
+            ret_best_state=ret_best_state,
+            max_tour_demand=max_tour_demand
+        )
+        # config vars
+        self.num_nodes = num_nodes
+        self.last_instance_id = -1
+        self.seed = seed
+        self.ret_opt_tour = ret_opt_tour
+        self.init()
+
+    def reset_episode(self):
+        """
+        similar to reset(), but does not resample the node tour - re-uses the state from last episode, never fetches
+        new instance
+        :return:
+        """
+        self.set_instance_as_state(
+            self.cur_instance,
+            init_tour=self.state.all_tours_as_list(remove_last_depot=False),
+            best_tour=self.best_state.all_tours_as_list(remove_last_depot=False),
+            id=self.state.id,
+            ret_opt_tour=self.ret_opt_tour
+        )
+        return self.get_state()
+
+    def reset(self, fetch_next=True, max_num_steps=None):
+        """
+        resets the *run* - fetches a new instance (if fetch_next=True), and resamples a node tour from random
+        :param fetch_next:
+        :return:
+        """
+        if fetch_next or self.cur_instance is None:
+            self.cur_instance = self.get_next_instance()
+
+        b = self.cur_instance
+        self.set_instance_as_state(
+            b,
+            init_tour=None,
+            best_tour=None,
+            id=self.last_instance_id,
+            ret_opt_tour=self.ret_opt_tour,
+            max_num_steps=max_num_steps
+        )
+        return self.get_state()
+
+
+class VRPMultiRandomEnv(Env):
+    def __init__(
+        self,
+        num_nodes=10,
+        max_num_steps=50,
+        max_tour_demand=10.,
+        ret_opt_tour=False,
+        num_samples_per_instance=1,
+        num_instance_per_batch=1,
+        seed=42
+    ):
+        self.num_envs = num_samples_per_instance * num_instance_per_batch
+        self.max_num_steps = max_num_steps
+        self.envs = make_mp_envs(num_env=self.num_envs, num_steps=max_num_steps, max_tour_demand=max_tour_demand)
+
+        self.num_nodes = num_nodes
+        self.seed = seed
+        assert num_samples_per_instance > 0
+        self.num_samples_per_instance = num_samples_per_instance
+        self.num_instance_per_batch = num_instance_per_batch
+        self.last_instance_id = -1
+        self.ret_opt_tour = ret_opt_tour
+        self.init()
+
+    def init(self):
+        self.cur_instances = [None for _ in range(self.num_samples_per_instance)]
+        self.cur_instance_ids = [None for _ in range(self.num_samples_per_instance)]
+        self.rng = np.random.default_rng(self.seed)
+    
+    def reset_episode(self):
+        """
+        similar to reset(), but does not resample the node tour - re-uses the state from last episode, never fetches
+        new instance
+        :return:
+        """
+        self.envs.reset_episode()
+
+    def get_next_instance(self):
+        N = self.num_nodes
+        # get a new batch from TSPReader and initialize the state
+        demands = np.ones(shape=(N))
+        coords = np.zeros(shape=(N + 1, 2))
+        coords[0] = 0.5
+        coords[1:] = np.random.random(size=(N, 2))
+
+        instance = {
+            'nodes_coord': coords, 'demands': demands
+        }
+        self.last_instance_id += 1
+        return instance
+
+    def reset(self, fetch_next=True, max_num_steps=None):
+        if fetch_next or self.cur_instances[0] is None:
+            instances = []
+            instance_ids = []
+            for i in range(self.num_instance_per_batch):
+                instances.append(self.get_next_instance())
+                instance_ids.append(self.last_instance_id)
+                for j in range(1, self.num_samples_per_instance):
+                    instances.append(copy.deepcopy(instances[-1]))
+                    instance_ids.append(instance_ids[-1])
+            self.cur_instances = instances
+            self.cur_instance_ids = instance_ids
+
+        max_num_steps = max_num_steps if max_num_steps else self.max_num_steps
+        return self.envs.set_instances_run(
+            self.cur_instances,
+            self.cur_instance_ids,
+            [max_num_steps] * self.num_envs
+        )
+
+    def step(self, actions):
+        assert len(actions) == self.num_envs
+        return self.envs.step(actions)
+
 
 
 from matplotlib import pyplot as plt
@@ -1232,6 +1937,40 @@ if __name__=="__main__":
     coords[1:] = np.random.random(size=(N, 2))
 
     state = VRPState(coords, node_demands=demands, max_tour_demand=4)
+
+    tour_edges, _ = enumerate_all_tours_edges(
+        state.tour_idx_to_tour(), directed=True
+    )
+    reloc_nbhs = enumerate_relocate_neighborhood(state.tour_idx_to_tour(), tour_edges)
+    nbh_vect = []
+
+    for nbh in reloc_nbhs:
+        tour0 = nbh['src_tour']
+        tour1 = nbh['dst_tour']
+        node_edge_pairs = nbh['node_edges_pairs']
+        nbh_vect.append(node_edge_pairs)
+
+    nbh_vect = np.concatenate(nbh_vect, axis=0)
+    print(nbh_vect)
+
+
+    src_u = nbh_vect[:, 1:3]
+    src_v = nbh_vect[:, 3:5]
+    dst_w = nbh_vect[:, 5:7]
+    src_node = nbh_vect[:, 0]
+
+    src_edges = np.stack([src_u, src_v, dst_w], axis=1)
+    dst_edges = np.stack([
+        np.stack([src_u[:, 0], src_v[:, 1]], axis=1),
+        np.stack([dst_w[:, 0], src_node], axis=1),
+        np.stack([src_node, dst_w[:, 1]], axis=1)
+    ], axis=1)
+
+    print(dst_edges.shape, src_edges.shape)
+
+    nbh_rep_vectorized = dedup_nbh_vectorized(src_edges, dst_edges)
+
+    assert False
 
     data = {'loc': coords[1:], 'depot': coords[0], 'demand': demands_norm}
 

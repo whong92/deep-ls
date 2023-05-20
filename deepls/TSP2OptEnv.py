@@ -179,6 +179,8 @@ class TSP2OptState:
 class TSP2OptEnvBase(Env):
     """
     Base env class implementing all the 2 opt logic
+
+    Has the flexibility to set a state arbitrarily
     """
     def __init__(
         self,
@@ -241,7 +243,6 @@ class TSP2OptEnvBase(Env):
 
     def step(self, action):
         if self.done:
-            # TODO: raise exception here??
             return self.state, 0, self.done
 
         self.cur_step += 1
@@ -252,7 +253,6 @@ class TSP2OptEnvBase(Env):
             self.done = True
 
         if self.done:
-            # TODO: make a terminal state??
             # if the action given in t-1 was terminate, or cur_step == T
             # then the reward is cost(S[t-1])
             if self.ret_log_tour_len:
@@ -273,6 +273,9 @@ class TSP2OptEnv(TSP2OptEnvBase):
     """
     TSP2OptEnvBase but with utilities to read in the data file, and some additional
     bells and whistles to modify the way we produce samples
+
+    Main difference is that it is tied to a data file, no way of manually specifying
+    the graph
     """
     def __init__(
         self,
@@ -311,6 +314,8 @@ class TSP2OptEnv(TSP2OptEnvBase):
         """
         similar to reset(), but does not resample the node tour - re-uses the state from last episode, never fetches
         new instance
+
+        steps the cur_step to 0, done=False
         :return:
         """
         self.set_instance_as_state(

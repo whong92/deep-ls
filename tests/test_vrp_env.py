@@ -1,14 +1,12 @@
 import numpy as np
 from scipy.spatial.distance import pdist, squareform
-import pytest
-from deepls.VRPState import \
-    VRPState, \
-    enumerate_2_opt_neighborhood, \
-    enumerate_all_tours_edges, \
-    enumerate_cross_heuristic_neighborhood, \
-    enumerate_relocate_neighborhood, \
-    apply_relocate_move
-from deepls.graph_utils import tour_nodes_to_W
+from deepls.VRPState import (
+    VRPState,
+    enumerate_2_opt_neighborhood,
+    enumerate_all_tours_edges,
+    enumerate_cross_heuristic_neighborhood,
+    enumerate_relocate_neighborhood
+)
 
 
 def _make_random_single_tour(N = 50):
@@ -24,15 +22,15 @@ def _make_double_loop_tour(N = 10):
     split = np.random.randint(1, N * 2)
     rand_tour0 = nodes_idxs[:split]
     rand_tour1 = nodes_idxs[split:]
-    return nodes, rand_tour0, rand_tour1
+    demands = np.ones(shape=(N * 2))
+    return nodes, rand_tour0, rand_tour1, demands
 
 
 def test_double_tour_reloc():
     N = 10
-    nodes, rand_tour0, rand_tour1 = _make_double_loop_tour(N)
-
+    nodes, rand_tour0, rand_tour1, demands = _make_double_loop_tour(N)
     def orig_state():
-        return VRPState(nodes, [rand_tour0, rand_tour1])
+        return VRPState(nodes, node_demands=demands, tours_init=[rand_tour0, rand_tour1])
 
     state = orig_state()
     tour_edges, _ = enumerate_all_tours_edges(
@@ -79,12 +77,12 @@ def test_double_tour_reloc():
 
 def test_double_tour_state_cross():
     N = 10
-    nodes, rand_tour0, rand_tour1 = _make_double_loop_tour(N)
+    nodes, rand_tour0, rand_tour1, demands = _make_double_loop_tour(N)
 
     # TODO: iterate over different N, and different splits, maybe separate out edge cases e.g. single tours / noops,
     #  maybe even remove noops
     def orig_state():
-        return VRPState(nodes, [rand_tour0, rand_tour1])
+        return VRPState(nodes, node_demands=demands, tours_init=[rand_tour0, rand_tour1])
 
     state = orig_state()
     tour_edges, _ = enumerate_all_tours_edges(
@@ -183,11 +181,13 @@ def test_double_tour_state_cross():
             else:
                 assert new_adj[e1p[0], e1p[1]] == new_adj[e1p[1], e1p[0]] == 1
 
+
 # @pytest.mark.parmetrize('N', [10, 20])
 def test_single_tour_state_2_opt():
     N = 10
     nodes, rand_tour, edge_weights = _make_random_single_tour(N)
-    state = VRPState(nodes, [rand_tour])
+    demands = np.ones(shape=(N))
+    state = VRPState(nodes, node_demands=demands, tours_init=[rand_tour])
     tour_edges, tour_adj = enumerate_all_tours_edges(
         state.tour_idx_to_tour(), directed=True
     )
@@ -240,4 +240,4 @@ def test_single_tour_state_2_opt():
                 )
 
             # restore to original state
-            state = VRPState(nodes, [rand_tour])
+            state = VRPState(nodes, node_demands=demands, tours_init=[rand_tour])
