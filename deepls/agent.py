@@ -669,6 +669,7 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
         self.policy_optimize_every = agent_config['policy_optimize_every']
         self.minibatch_size = agent_config['minibatch_sz']
         self.use_ppo_update = agent_config.get('use_ppo_update', False)
+        self.entropy_bonus = agent_config.get('entropy_bonus', 0.)
         self.greedy = False
 
     def compute_baseline(self, experiences, perm):
@@ -705,9 +706,15 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
             self.optimizer.zero_grad()
             for (minibatch_perm, minibatch_returns, minibatch_baseline), weight in \
                     iter_over_tensor_minibatch(perm, returns, baseline, minibatch_size=self.minibatch_size):
-                h_sa, h_sa_old = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
+                action_pref_output = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
                 td_err = (minibatch_returns.clone() - minibatch_baseline.detach()).to(self.device)
 
+                h_sa = action_pref_output[0]
+                h_sa_old = action_pref_output[1]
+                if len(action_pref_output) > 2:
+                    policy_entropy = action_pref_output[2]
+                else:
+                    policy_entropy = 0.
                 if self.use_ppo_update:
                     # PPO update
                     ratio = torch.exp(h_sa - h_sa_old)
@@ -715,10 +722,12 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
                     policy_loss_p2 = -td_err * torch.clip(ratio, 1. - PPO_EPS, 1. + PPO_EPS)
                     policy_loss = torch.maximum(policy_loss_p1, policy_loss_p2).mean() * weight
                 else:
-                    print(" ============== ")
                     # regular PG update
                     eligibility_loss = -h_sa  # NLL loss
-                    policy_loss = (td_err * eligibility_loss).mean() * weight  # TODO: discounting!(?)
+                    # entropy bonus
+                    beta = self.entropy_bonus
+                    # TODO: discounting!(?)
+                    policy_loss = (td_err * eligibility_loss - beta * policy_entropy).mean() * weight
                 policy_loss.backward()
             self.optimizer.step()
 

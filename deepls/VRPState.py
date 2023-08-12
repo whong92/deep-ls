@@ -2,15 +2,12 @@ import numpy as np
 from typing import List, Optional, Dict, Tuple, Any, Union
 import random
 
-import pandas as pd
+from datetime import datetime
 import torch
 
 import os, sys
 from sklearn.metrics.pairwise import euclidean_distances
 from deepls.graph_utils import tour_nodes_to_tour_len
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-print(sys.path)
 
 def tour_nodes_to_node_rep(tour_nodes):
     # Compute node representation of tour
@@ -80,70 +77,6 @@ def enumerate_tour_edges(nodes: np.ndarray, directed=False):
     # edges.append((int(nodes[N - 1]), 0))
     # edges.append((0, int(nodes[N - 1])))
     return np.array(edges)
-
-
-def enumerate_2_opt_neighborhood(tours_edges_directed: Dict[int, np.ndarray]):
-    tours_edges_pairs = []
-    for tour_idx, tour_edges in tours_edges_directed.items():
-        # tour_edges shaped T x 2
-        T, _ = tour_edges.shape
-        tour_edges_pairs = np.concatenate([
-            np.tile(tour_edges[:, None, :], (1, T, 1)),
-            np.tile(tour_edges[None, :, :], (T, 1, 1))
-        ], axis=2)  # T x T x 4 - last dim is u, v, x, y
-        # indices of a T x T matrix where j > i so we don't take duplicate pairs
-        rs, cs = np.triu_indices(T, k=1)
-        tour_edges_pairs = tour_edges_pairs[rs, cs, :]
-        tour_edges_pairs = np.concatenate(
-            (
-                tour_edges_pairs,
-                tour_edges_pairs[:, [0, 2, 1, 3]],  # u, x, v, y
-            ),
-            axis=1
-        )
-        tours_edges_pairs.append({
-            'tour_idx': tour_idx,
-            'tour_edges_pairs': tour_edges_pairs # last dim is uvxy, uxvy
-        })
-    return tours_edges_pairs
-
-
-def enumerate_cross_heuristic_neighborhood(tours_edges_directed_dict: Dict[int, np.ndarray]):
-    neighborhood = []
-    # tour_idxs = []
-    # tours_edges_directed_list = []
-    # for tour_idx, tour_edges_directed in tours_edges_directed_dict.items():
-    #     tour_idxs.append(tour_idx)
-    #     tours_edges_directed_list.append(tour_edges_directed)
-
-    # for i, (src_tour, src_tour_edges) in enumerate(zip(tour_idxs, tours_edges_directed_list)):
-    for src_tour, src_tour_edges in tours_edges_directed_dict.items():
-        # for dst_tour, dst_tour_edges in zip(tour_idxs[i + 1:], tours_edges_directed_list[i + 1:]): # enumerate(tours_edges_directed[src_tour + 1:], src_tour + 1):
-        for dst_tour, dst_tour_edges in tours_edges_directed_dict.items():
-            if dst_tour <= src_tour:  # is symmetric neighborhood, so no need to consider anything below diagonal
-                continue
-            T_src = src_tour_edges.shape[0]
-            T_dst = dst_tour_edges.shape[0]
-            tour_edges_pairs = np.concatenate([
-                np.tile(src_tour_edges[:, None, :], (1, T_dst, 1)),
-                np.tile(dst_tour_edges[None, :, :], (T_src, 1, 1))
-            ], axis=2)  # T_src x T_dst x 4 - last dim is u, v, x, y
-            tour_edges_pairs = np.reshape(tour_edges_pairs, (-1, 4))
-            tour_edges_pairs = np.concatenate(
-                (
-                    tour_edges_pairs,
-                    tour_edges_pairs[:, [0, 2, 1, 3]],  # u, x, v, y
-                    tour_edges_pairs[:, [0, 3, 1, 2]],  # u, y, v, x
-                ),
-                axis=1
-            )
-            neighborhood.append({
-                'src_tour': src_tour,
-                'dst_tour': dst_tour,
-                'tour_edges_pairs': tour_edges_pairs
-            })
-
-    return neighborhood
 
 
 def enumerate_relocate_neighborhood_given(
@@ -255,56 +188,6 @@ def enumerate_cross_neighborhood_given(
             'dst_tour': dst_tour,
             'tour_edges_pairs': tour_edges_pairs
         })
-    return neighborhood
-
-
-def enumerate_relocate_neighborhood(tours: Dict[int, np.ndarray], tours_edges_directed: Dict[int, np.ndarray]):
-    neighborhood = []
-    # for src_tour_idx, (src_tour, src_edges) in enumerate(zip(tours, tours_edges_directed)):
-    for src_tour_idx in tours.keys():
-        src_tour = tours[src_tour_idx]
-        src_edges = tours_edges_directed[src_tour_idx]
-        # we skip the depot nodes (because you can't move those)
-        src_nodes = src_tour[1:-1]
-        T_src = src_nodes.shape[0]
-        # add src node edges for convenience, the edges need to be in order of the tour
-        src_edges_cat = np.concatenate([
-            src_edges[0:-1],  # inbound edges
-            src_edges[1:],  # outbound edges
-        ], axis=1)  # T_src, 4
-        assert np.all(src_edges_cat[:, 1] == src_nodes) and np.all(src_edges_cat[:, 2] == src_nodes)
-
-        # relocate to depot move
-        node_edges_pairs = np.concatenate([
-            np.tile(src_nodes[:, None, None], (1, 1, 1)),  #  T_src, 1, 1
-            np.tile(src_edges_cat[:, None, :], (1, 1, 1)),  # T_src, 1, 4
-            np.tile(np.array([[[0, -1]]]), (T_src, 1, 1))  # T_src, 1, 2
-        ], axis=2)
-        node_edges_pairs = np.reshape(node_edges_pairs, (-1, 7))
-        neighborhood.append({
-            'src_tour': src_tour_idx,
-            'dst_tour': None,
-            'node_edges_pairs': node_edges_pairs
-        })
-
-        # relocate to other tour move
-        # for dst_edges_idx, dst_edges in enumerate(tours_edges_directed):
-        for dst_edges_idx, dst_edges in tours_edges_directed.items():
-            if src_tour_idx == dst_edges_idx:
-                continue
-            T_dst = dst_edges.shape[0]
-            node_edges_pairs = np.concatenate([
-                np.tile(src_nodes[:, None, None], (1, T_dst, 1)),  # T_src, T_dst, 1
-                np.tile(src_edges_cat[:, None, :], (1, T_dst, 1)),  # T_src, T_dst, 1
-                np.tile(dst_edges[None, :, :], (T_src, 1, 1))  # T_src, T_dst, 1
-            ], axis=2)
-            node_edges_pairs = np.reshape(node_edges_pairs, (-1, 7))
-
-            neighborhood.append({
-                'src_tour': src_tour_idx,
-                'dst_tour': dst_edges_idx,
-                'node_edges_pairs': node_edges_pairs
-            })
     return neighborhood
 
 
@@ -473,14 +356,22 @@ def apply_relocate_move(
 
 
 class VRPState:
+    # WLOG, demands should be scaled appropriately
+    VEHICLE_CAPACITY = 1.0
+
+    def get_node_demands(self, include_depot=False):
+        if include_depot:
+            return np.concatenate((np.array([0.]), self.node_demands))
+        return self.node_demands
 
     def __init__(
         self,
         nodes_coord: np.ndarray,  # depot is always node 0,
         node_demands: np.ndarray,
-        max_tour_demand: Optional[float] = None,
+        max_tour_demand: Optional[float] = VEHICLE_CAPACITY,
         tours_init: Optional[List[np.ndarray]] = None,
-        id = None
+        id=None,
+        opt_tour_dist: Optional[float] = None,
     ):
         self.nodes_coord = nodes_coord
         self.edge_weights = euclidean_distances(nodes_coord)
@@ -488,6 +379,7 @@ class VRPState:
         self.max_tour_demand = max_tour_demand if max_tour_demand else np.sum(node_demands)
         self.N = len(self.nodes_coord) - 1
         self.id = id
+        self.opt_tour_dist = opt_tour_dist
 
         if tours_init:
             assert sum([len(tour) for tour in tours_init]) == self.N
@@ -515,10 +407,12 @@ class VRPState:
                 }
         self.nbh = self.make_nbh()
 
-    def all_tours_as_list(self, remove_last_depot=False):
+    def all_tours_as_list(self, remove_last_depot=False, remove_first_depot=False):
         all_tours_list = [t['tour'] for t in self.tours.values()]
         if remove_last_depot:
             all_tours_list = [t[:-1] for t in all_tours_list]
+        if remove_first_depot:
+            all_tours_list = [t[1:] for t in all_tours_list]
         return all_tours_list
 
     def tour_idx_to_tour(self, remove_last_depot=False) -> Dict[int, np.ndarray]:
@@ -776,7 +670,8 @@ def check_cross_move_valid(
     else:
         raise ValueError("invalid cross move")
 
-    assert tour_1_new_dem + tour_0_new_dem == C0 + C1
+    assert np.isclose(tour_1_new_dem + tour_0_new_dem, C0 + C1), \
+        f"{cum_demand_0}, {cum_demand_1}, {tour_0_new_dem}, {tour_1_new_dem}, {C0}, {C1}"
     return (tour_0_new_dem <= max_tour_demand) and (tour_1_new_dem <= max_tour_demand)
 
 
@@ -949,73 +844,6 @@ def flatten_deduplicate_2opt_nbh(
     return two_opt_nbh_dict
 
 
-class VRPNbH:
-    @staticmethod
-    def enumerate_all_nbs(state: VRPState):
-        # relocation heuristic
-        tour_edges, _ = enumerate_all_tours_edges(
-            state.tour_idx_to_tour(), directed=True
-        )
-        reloc_nbhs = enumerate_relocate_neighborhood(state.tour_idx_to_tour(), tour_edges)
-        reloc_nbhs_dict = flatten_deduplicate_reloc_nbh(reloc_nbhs, state)
-
-        # cross heuristic
-        cross_nbhs = enumerate_cross_heuristic_neighborhood(tour_edges)
-
-        cross_nbh_dict = flatten_deduplicate_cross_nbh(cross_nbhs, state)
-
-        # 2opt heuristics
-        twoopt_nbhs = enumerate_2_opt_neighborhood(tour_edges)
-
-        two_opt_nbh_dict = flatten_deduplicate_2opt_nbh(twoopt_nbhs)
-
-        # figure out how to make repeatable sequence generation
-        nbh_list = []
-        num_moves_lim = 30
-        reloc_nbhs_dict = list(reloc_nbhs_dict.values())
-        bla = 0
-        bla += len(reloc_nbhs_dict)
-        if len(reloc_nbhs_dict) > num_moves_lim:
-            perm = np.random.choice(len(reloc_nbhs_dict), num_moves_lim)
-            reloc_nbhs_dict = [reloc_nbhs_dict[p] for p in perm]
-
-
-        cross_nbh_dict = list(cross_nbh_dict.values())
-        bla += len(cross_nbh_dict)
-        if len(cross_nbh_dict) > num_moves_lim:
-            perm = np.random.choice(len(cross_nbh_dict), num_moves_lim)
-            cross_nbh_dict = [cross_nbh_dict[p] for p in perm]
-
-        two_opt_nbh_dict = list(two_opt_nbh_dict.values())
-        bla += len(two_opt_nbh_dict)
-        # print(bla)
-        if len(two_opt_nbh_dict) > num_moves_lim:
-            perm = np.random.choice(len(two_opt_nbh_dict), num_moves_lim)
-            two_opt_nbh_dict = [two_opt_nbh_dict[p] for p in perm]
-        nbh_list.extend(reloc_nbhs_dict)
-        nbh_list.extend(cross_nbh_dict)
-        nbh_list.extend(two_opt_nbh_dict)
-
-        return nbh_list, reloc_nbhs_dict, cross_nbh_dict, two_opt_nbh_dict
-
-    def __init__(self, state: VRPState):
-        nbh_list, relocate_nbhs, cross_nbhs, two_opt_nbhs = VRPNbH.enumerate_all_nbs(state)
-        # at this point I should be passing the entire state in
-        self.tour_edges, _ = enumerate_all_tours_edges(
-            state.tour_idx_to_tour(), directed=True
-        )
-        self.tour_nodes = enumerate_all_tours_nodes(state.tour_idx_to_tour())
-        self.tours = state.tours
-
-        self.nbh_list = nbh_list
-        self.relocate_nbhs_vectorized = vectorize_reloc_moves(relocate_nbhs)
-        self.cross_nbhs_vectorized = vectorize_cross_moves(cross_nbhs)
-        self.two_opt_nbhs_vectorized = vectorize_twopt_moves(two_opt_nbhs)
-
-    def get_nb(self, i):
-        return self.nbh_list[i]
-
-
 class VRPNbHAutoReg:
     @staticmethod
     def vectorize_moves(reloc_nbh=None, cross_nbh=None, twp_opt_nbh=None):
@@ -1077,7 +905,6 @@ class VRPNbHAutoReg:
             edge_tour = move_0['tour_idx']
             cross_nbh = enumerate_cross_neighborhood_given(edge_tour, edge, self.tour_edges)
             two_opt_nbh = enumerate_2_opt_neighborhood_given(edge_tour, edge, self.tour_edges)
-
             cross_nbh = flatten_deduplicate_cross_nbh(cross_nbhs=cross_nbh, state=state)
             two_opt_nbh = flatten_deduplicate_2opt_nbh(two_opt_nbh)
 
@@ -1319,6 +1146,11 @@ def worker(remote, parent_remote, env_fn):
     parent_remote.close()
     env: VRPEnvBase = env_fn()
     env.init()
+
+    cur_instance = None
+    cur_instance_id = None
+    max_num_steps = None
+
     while True:
         cmd, data = remote.recv()
 
@@ -1331,27 +1163,27 @@ def worker(remote, parent_remote, env_fn):
         #     remote.send(env.reset())
 
         elif cmd == 'reset_episode':
-            instance, instance_id, max_num_steps = data
-            instance = {
-                'nodes_coord': env.state.nodes_coord, 'demands': env.state.node_demands
-            }
+            assert cur_instance_id, "cannot reset episode before setting a run instance"
             remote.send(env.set_instance_as_state(
-                instance=instance,
-                init_tour=env.state.all_tours_as_list(remove_last_depot=False),
-                best_tour=env.best_state.all_tours_as_list(remove_last_depot=False),
-                id=instance_id,
+                instance=env.cur_instance,
+                init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                best_tour=env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                id=cur_instance_id,
                 max_num_steps=max_num_steps
             ))
         
         elif cmd == 'set_instance_run':
-            instance, instance_id, max_num_steps = data
+            cur_instance, cur_instance_id, max_num_steps = data
             remote.send(env.set_instance_as_state(
-                instance=instance,
+                instance=cur_instance,
                 init_tour=None,
                 best_tour=None,
-                id=instance_id,
+                id=cur_instance_id,
                 max_num_steps=max_num_steps
             ))
+
+        elif cmd == 'get_state':
+            remote.send(env.get_state())
 
         # elif cmd == 'render':
         #     remote.send(env.render())
@@ -1454,16 +1286,15 @@ class SubprocVecEnv:
         but otherwise keeps the state exactly the same
         :return:
         """
-        for remote, instance, instance_id, max_num_steps in \
-                zip(self.remotes):
+        for remote in self.remotes:
             remote.send(('reset_episode', (None, )))
         return [remote.recv() for remote in self.remotes]
 
-    def reset(self):
+    def get_state(self):
         for remote in self.remotes:
-            remote.send(('reset', None))
-
-        return [remote.recv() for remote in self.remotes]
+            remote.send(('get_state', (None, )))
+        states = [remote.recv() for remote in self.remotes]
+        return states
 
     def close(self):
         if self.closed:
@@ -1490,18 +1321,23 @@ class VRPEnvBase(Env):
         self.max_num_steps = max_num_steps
         self.ret_best_state = ret_best_state
         self.max_tour_demand = max_tour_demand
+        # this is the original representation of the problem before any fudging
+        self.cur_instance = None
 
     def init(self):
         self.cur_step = -1
 
     def _make_state_from_batch_and_tour(self, b, init_tours, id):
+        # normalize it so that in the VRPState, max_tour_demand == VRPState.VEHICLE_CAPACITY
+        scale = VRPState.VEHICLE_CAPACITY / self.max_tour_demand
         return VRPState(
             nodes_coord=b['nodes_coord'],
-            node_demands=b['demands'],
+            node_demands=b['demands'] * scale,
             tours_init=init_tours,
-            max_tour_demand=self.max_tour_demand,
+            max_tour_demand=VRPState.VEHICLE_CAPACITY,
             # opt_tour=b['tour_nodes'][0],  # TODO: optimal tour
-            id=id
+            id=id,
+            opt_tour_dist=b.get('opt_dist')
         )
 
     def set_instance_as_state(
@@ -1518,19 +1354,22 @@ class VRPEnvBase(Env):
         best_state = None
         if best_tour is not None:
             best_state = self._make_state_from_batch_and_tour(b, best_tour, id)
-        self.set_state(
+        self._set_state(
+            instance,
             state=state,
             best_state=best_state,
             max_num_steps=max_num_steps
         )
         return self.get_state()
 
-    def set_state(
+    def _set_state(
         self,
+        instance: Dict[str, Any],
         state: VRPState,
         best_state: Optional[VRPState] = None,
         max_num_steps: Optional[int] = None
     ):
+        self.cur_instance = copy.deepcopy(instance)
         self.state = copy.deepcopy(state)
         self.best_state = copy.deepcopy(self.state) if best_state is None else best_state
         self.cur_step = 0
@@ -1587,7 +1426,6 @@ class VRPEnvRandom(VRPEnvBase):
 
     def init(self):
         super().init()
-        self.cur_instance = None
         self.rng = np.random.default_rng(self.seed)
 
     def __init__(
@@ -1633,9 +1471,9 @@ class VRPEnvRandom(VRPEnvBase):
         :return:
         """
         if fetch_next or self.cur_instance is None:
-            self.cur_instance = self.get_next_instance()
-
-        b = self.cur_instance
+            b = self.get_next_instance()
+        else:
+            b = self.cur_instance
         self.set_instance_as_state(
             b,
             init_tour=None,
@@ -1647,7 +1485,7 @@ class VRPEnvRandom(VRPEnvBase):
         return self.get_state()
 
 
-class VRPMultiRandomEnv(Env):
+class VRPMultiEnvAbstract(Env):
     def __init__(
         self,
         num_nodes=10,
@@ -1660,6 +1498,7 @@ class VRPMultiRandomEnv(Env):
     ):
         self.num_envs = num_samples_per_instance * num_instance_per_batch
         self.max_num_steps = max_num_steps
+        self.max_tour_demand = max_tour_demand
         self.envs = make_mp_envs(num_env=self.num_envs, num_steps=max_num_steps, max_tour_demand=max_tour_demand)
 
         self.num_nodes = num_nodes
@@ -1685,18 +1524,7 @@ class VRPMultiRandomEnv(Env):
         self.envs.reset_episode()
 
     def get_next_instance(self):
-        N = self.num_nodes
-        # get a new batch from TSPReader and initialize the state
-        demands = np.ones(shape=(N))
-        coords = np.zeros(shape=(N + 1, 2))
-        coords[0] = 0.5
-        coords[1:] = np.random.random(size=(N, 2))
-
-        instance = {
-            'nodes_coord': coords, 'demands': demands
-        }
-        self.last_instance_id += 1
-        return instance
+        raise NotImplementedError()
 
     def reset(self, fetch_next=True, max_num_steps=None):
         if fetch_next or self.cur_instances[0] is None:
@@ -1721,6 +1549,65 @@ class VRPMultiRandomEnv(Env):
     def step(self, actions):
         assert len(actions) == self.num_envs
         return self.envs.step(actions)
+
+    def get_state(self):
+        return self.envs.get_state()
+
+
+class VRPMultiRandomEnv(VRPMultiEnvAbstract):
+    def get_next_instance(self):
+        N = self.num_nodes
+        # get a new batch from TSPReader and initialize the state
+        demands = np.ones(shape=(N))
+        coords = np.zeros(shape=(N + 1, 2))
+        coords[0] = 0.5
+        coords[1:] = np.random.random(size=(N, 2))
+
+        instance = {
+            'nodes_coord': coords, 'demands': demands
+        }
+        self.last_instance_id += 1
+        return instance
+
+
+import pickle
+class VRPMultiFileEnv(VRPMultiEnvAbstract):
+    def __init__(self, data_f, results_f=None, *args, **kwargs):
+        self.data_f = data_f
+        self.results_f = results_f
+        super().__init__(*args, **kwargs)
+        self.init()
+
+    def init(self):
+        with open(self.data_f, 'rb') as fp:
+            self.data = pickle.load(fp)
+        self.data_iter = self.data.__iter__()
+
+    def get_next_instance(self):
+        try:
+            instance = next(self.data_iter)
+        except StopIteration as e:
+            self.data_iter = self.data_iter.__iter__()
+            instance = next(self.data_iter)
+
+        # format it properly
+        depot = np.array(instance['depot'])
+        nodes = np.array(instance['nodes'])
+        capacity = instance['capacity']
+        opt_dist = instance.get('opt_dist')
+        opt_tour = instance.get('opt_tour')
+        if len(nodes) != self.num_nodes:
+            raise ValueError("Num nodes do not match")
+        if capacity != self.max_tour_demand:
+            raise ValueError("max capacity doesn't match")
+        # demands are assumed to be 1
+        demands = np.ones(shape=(self.num_nodes))
+        coords = np.concatenate((depot[None, :], nodes), axis=0)
+        instance = {
+            'nodes_coord': coords, 'demands': demands, 'opt_dist': opt_dist, 'opt_tour': opt_tour
+        }
+        self.last_instance_id += 1
+        return instance
 
 
 
@@ -1781,7 +1668,10 @@ def plot_vehicle_routes(data, routes, ax1, markersize=5, visualize_demands=False
         total_route_demand = sum(route_demands)
         assert total_route_demand <= capacity
         if not visualize_demands:
-            ax1.plot(xs, ys, 'o', mfc=color, markersize=markersize, markeredgewidth=0.0)
+            # ax1.plot(xs, ys, 'o', mfc=color, markersize=markersize, markeredgewidth=0.0)
+            for i, x, y in zip(r, xs, ys):
+                ax1.plot(x, y, 'o', mfc=color, markersize=markersize, markeredgewidth=0.0)
+                ax1.text(x, y, s=str(i))
 
         dist = 0
         x_prev, y_prev = x_dep, y_dep
@@ -1830,6 +1720,16 @@ def plot_vehicle_routes(data, routes, ax1, markersize=5, visualize_demands=False
         ax1.add_collection(pc_cap)
         ax1.add_collection(pc_used)
         ax1.add_collection(pc_dem)
+
+
+def plot_state(state: VRPState, fname: Optional[str] = None):
+    fig, ax = plt.subplots(figsize=(4, 4))
+    data = {'loc': state.nodes_coord[1:], 'depot': state.nodes_coord[0], 'demand': state.get_node_demands()}
+    plot_vehicle_routes(data, [t[1:] for t in state.all_tours_as_list(remove_last_depot=True)], ax1=ax)
+    if fname:
+        plt.savefig(fname)
+    plt.show()
+
 
 if __name__=="__main__":
     # tour_edges = [
