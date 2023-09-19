@@ -168,7 +168,6 @@ class ExperienceBuffer:
 
 class REINFORCEAgent(BaseAgent):
     __metaclass__ = ABCMeta
-
     def init_replay_buffer(self, replay_buffer_size):
         # initialize replay buffer
         self.replay_buffer = ExperienceBuffer(replay_buffer_size)
@@ -192,6 +191,7 @@ class REINFORCEAgent(BaseAgent):
         self._agent_init(agent_config)
         self.init_replay_buffer(agent_config['replay_buffer_size'])
         self.batch_size = agent_config['batch_sz']
+        self.gamma = agent_config.get('gamma', 1.0)
 
     def agent_start(self, state):
         """The first method called when the experiment starts, called after
@@ -286,13 +286,21 @@ class REINFORCEAgent(BaseAgent):
 
             # compute returns - no discounting for now
             experience = self.replay_buffer.get_episode(self.episode)
-            returns = torch.flip(
-                torch.cumsum(
-                    torch.as_tensor([step['reward'] for step in experience][::-1]),
-                    dim=0
-                ),
-                dims=[0]
-            )  # num_steps x batch_size
+            # building the discount matrix
+            # B x n_steps
+            reward = torch.as_tensor([step['reward'] for step in experience]).T
+
+            n_steps = reward.shape[1]
+            gamma = self.gamma
+            d_r0 = torch.pow(gamma, torch.arange(0, n_steps))
+            d_mat = torch.zeros(size=(n_steps, n_steps))
+
+            for r in range(n_steps):
+                d_mat[r, r:] = d_r0[:n_steps - r]
+            # B x n_steps x n_steps (to sum over)
+            rewards_mat = reward[:, None, :] * d_mat[None, :, :]
+            returns = torch.sum(rewards_mat, dim=2).T  # n_steps x B
+
             for ret, step in zip(returns, experience):
                 state_ids = np.array([state[0].id for state in step['state']])
                 df = pd.DataFrame({'state_ids': state_ids, 'returns': ret.numpy()})
@@ -487,10 +495,12 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
         if init_config:
             self.agent_init(agent_config)
         self.net.load_state_dict(bla['net'], strict=False)
-        self.critic_baseline.load_state_dict(bla['critic'], strict=False)
+        if 'critic' in bla:
+            self.critic_baseline.load_state_dict(bla['critic'], strict=False)
         if load_optim:
             self.optimizer.load_state_dict(bla['optimizer'])
-            self.critic_optimizer.load_state_dict(bla['critic_optimizer'])
+            if 'critic_optimizer' in bla:
+                self.critic_optimizer.load_state_dict(bla['critic_optimizer'])
 
     def _agent_init(self, agent_config):
         self.agent_config = copy.deepcopy(agent_config)
@@ -531,6 +541,7 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
         self.critic_optimize_every = agent_config['critic_optimize_every']
         self.minibatch_size = agent_config['minibatch_sz']
         self.use_ppo_update = agent_config.get('use_ppo_update', False)
+        self.entropy_bonus = agent_config.get('entropy_bonus', 0.)
         self.greedy = False
 
     def compute_baseline_and_loss(self, experiences, perm, returns):
@@ -580,6 +591,7 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
 
         self.optimizer.zero_grad()
         self.critic_optimizer.zero_grad()
+        self.critic_abs_err = 0
         for (minibatch_perm, minibatch_returns), weight in \
                 iter_over_tensor_minibatch(perm, returns, minibatch_size=self.minibatch_size):
 
@@ -595,7 +607,13 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
                         minibatch_baseline, critic_loss = self.compute_baseline_and_loss(experiences, minibatch_perm, _returns)
 
             if optimize_policy:
-                h_sa, h_sa_old = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
+                action_pref_output = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
+                h_sa = action_pref_output[0]
+                h_sa_old = action_pref_output[1]
+                if len(action_pref_output) > 2:
+                    policy_entropy = action_pref_output[2]
+                else:
+                    policy_entropy = 0.
                 td_err = minibatch_returns.clone().to(self.device) - minibatch_baseline.detach()
                 if self.use_ppo_update:
                     # PPO update
@@ -606,13 +624,15 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
                 else:
                     # regular PG update
                     eligibility_loss = -h_sa  # NLL loss
-                    policy_loss = (td_err * eligibility_loss).mean() * weight
+                    # entropy bonus
+                    beta = self.entropy_bonus
+                    policy_loss = (td_err * eligibility_loss - beta * policy_entropy).mean() * weight
                 policy_loss.backward()
 
             self.critic_loss_val = critic_loss.detach().to('cpu')
-            self.critic_abs_err = torch.abs(
+            self.critic_abs_err += torch.abs(
                 minibatch_baseline.detach().to('cpu') - minibatch_returns
-            ).mean()
+            ).mean() * weight
 
         self.critic_optimizer.step()
         self.optimizer.step()

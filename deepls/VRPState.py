@@ -8,6 +8,7 @@ import torch
 import os, sys
 from sklearn.metrics.pairwise import euclidean_distances
 from deepls.graph_utils import tour_nodes_to_tour_len
+from enum import Enum
 
 def tour_nodes_to_node_rep(tour_nodes):
     # Compute node representation of tour
@@ -713,10 +714,13 @@ def flatten_deduplicate_reloc_nbh(
             src_v = node_edge_pair[3:5]
             dst_w = node_edge_pair[5:7]
             src_edges = [src_u, src_v, dst_w]
+            dst_wp = np.array([src_u[0], src_v[1]])
+            src_up = np.array([dst_w[0], src_node])
+            src_vp = np.array([src_node, dst_w[1]])
             dst_edges = [
-                np.array([src_u[0], src_v[1]]),
-                np.array([dst_w[0], src_node]),
-                np.array([src_node, dst_w[1]]),
+                dst_wp,
+                src_up,
+                src_vp,
             ]
             nbh_norm = get_normalized_nbh_rep(src_edges, dst_edges)
             e_add, e_rem = nbh_norm
@@ -730,6 +734,12 @@ def flatten_deduplicate_reloc_nbh(
             )):
                 continue
 
+            ew = state.edge_weights
+            cost = 0
+            for e in e_add:
+                cost -= ew[e[0], e[1]]
+            for e in e_rem:
+                cost += ew[e[0], e[1]]
             # remove no_ops and duplicates
             if not no_op and (nbh_norm not in reloc_nbhs_dict):
                 nb = {
@@ -743,6 +753,7 @@ def flatten_deduplicate_reloc_nbh(
                     "dst_wp": dst_edges[0],
                     "src_up": dst_edges[1],
                     "src_vp": dst_edges[2],
+                    "cost": cost
                 }
                 reloc_nbhs_dict[nbh_norm] = nb
     return reloc_nbhs_dict
@@ -771,6 +782,13 @@ def flatten_deduplicate_cross_nbh(
 
             e_add, e_rem = nbh_norm
             no_op = len(set(e_add).symmetric_difference(set(e_rem))) == 0
+
+            ew = state.edge_weights
+            cost = 0
+            for e in e_add:
+                cost -= ew[e[0], e[1]]
+            for e in e_rem:
+                cost += ew[e[0], e[1]]
             # remove no_ops and duplicates
             if (
                     not no_op and
@@ -785,6 +803,7 @@ def flatten_deduplicate_cross_nbh(
                     "e1": e1,
                     "e0p": e0p,
                     "e1p": e1p,
+                    "cost": cost
                 }
                 cross_nbh_dict[nbh_norm] = nb
             # second move
@@ -794,6 +813,13 @@ def flatten_deduplicate_cross_nbh(
 
             e_add, e_rem = nbh_norm
             no_op = len(set(e_add).symmetric_difference(set(e_rem))) == 0
+
+            cost = 0
+            for e in e_add:
+                cost -= ew[e[0], e[1]]
+            for e in e_rem:
+                cost += ew[e[0], e[1]]
+
             # remove no_ops and duplicates
             if (
                     not no_op and
@@ -808,6 +834,7 @@ def flatten_deduplicate_cross_nbh(
                     "e1": e1,
                     "e0p": e0p,
                     "e1p": e1p,
+                    "cost": cost
                 }
                 cross_nbh_dict[nbh_norm] = nb
 
@@ -816,6 +843,7 @@ def flatten_deduplicate_cross_nbh(
 
 def flatten_deduplicate_2opt_nbh(
     twoopt_nbhs: List[Dict[str, Union[np.ndarray, int]]],
+    state: VRPState
 ):
     two_opt_nbh_dict = {}
     for nbh in twoopt_nbhs:
@@ -829,15 +857,24 @@ def flatten_deduplicate_2opt_nbh(
             nbh_norm = get_normalized_nbh_rep([e0, e1], [e0p, e1p])
             e_add, e_rem = nbh_norm
             no_op = len(set(e_add).symmetric_difference(set(e_rem))) == 0
+
+            ew = state.edge_weights
+            cost = 0
+            for e in e_add:
+                cost -= ew[e[0], e[1]]
+            for e in e_rem:
+                cost += ew[e[0], e[1]]
+
             # remove no_ops and duplicates
             if not no_op and (nbh_norm not in two_opt_nbh_dict):
                 nb = {
                     "nb_type": "2opt",
                     "tour_idx": tour_idx,
-                    "e0": tour_edge_pair[:2],
-                    "e1": tour_edge_pair[2:4],
+                    "e0": e0,
+                    "e1": e1,
                     "e0p": e0p,
-                    "e1p": e1p
+                    "e1p": e1p,
+                    "cost": cost
                 }
                 two_opt_nbh_dict[nbh_norm] = nb
 
@@ -906,7 +943,7 @@ class VRPNbHAutoReg:
             cross_nbh = enumerate_cross_neighborhood_given(edge_tour, edge, self.tour_edges)
             two_opt_nbh = enumerate_2_opt_neighborhood_given(edge_tour, edge, self.tour_edges)
             cross_nbh = flatten_deduplicate_cross_nbh(cross_nbhs=cross_nbh, state=state)
-            two_opt_nbh = flatten_deduplicate_2opt_nbh(two_opt_nbh)
+            two_opt_nbh = flatten_deduplicate_2opt_nbh(two_opt_nbh, state=state)
 
             cross_nbh = list(cross_nbh.values())
             two_opt_nbh = list(two_opt_nbh.values())
@@ -1185,6 +1222,9 @@ def worker(remote, parent_remote, env_fn):
         elif cmd == 'get_state':
             remote.send(env.get_state())
 
+        elif cmd == 'get_instance':
+            remote.send(env.cur_instance)
+
         # elif cmd == 'render':
         #     remote.send(env.render())
 
@@ -1214,12 +1254,13 @@ class CloudpickleWrapper(object):
         return self.x()
 
 
-def make_mp_envs(num_env, num_steps, max_tour_demand):
+def make_mp_envs(num_env, num_steps, max_tour_demand, reward_mode):
     def make_env():
         def fn():
             env = VRPEnvBase(
                 max_num_steps=num_steps,
-                max_tour_demand=max_tour_demand
+                max_tour_demand=max_tour_demand,
+                reward_mode=reward_mode
             )
             return env
         return fn
@@ -1296,6 +1337,12 @@ class SubprocVecEnv:
         states = [remote.recv() for remote in self.remotes]
         return states
 
+    def get_instance(self):
+        for remote in self.remotes:
+            remote.send(('get_instance', (None,)))
+        states = [remote.recv() for remote in self.remotes]
+        return states
+
     def close(self):
         if self.closed:
             return
@@ -1309,12 +1356,18 @@ class SubprocVecEnv:
         self.closed = True
 
 
+class VRPReward(Enum):
+    FINAL_COST = 'FINAL_COST'
+    DELTA_COST = 'DELTA_COST'
+
+
 class VRPEnvBase(Env):
     def __init__(
         self,
+        reward_mode: VRPReward,
         max_num_steps=50,
         ret_best_state=True,
-        max_tour_demand=10.
+        max_tour_demand=10.,
     ):
         super(VRPEnvBase, self).__init__()
         # config vars
@@ -1323,6 +1376,7 @@ class VRPEnvBase(Env):
         self.max_tour_demand = max_tour_demand
         # this is the original representation of the problem before any fudging
         self.cur_instance = None
+        self.reward_mode = reward_mode
 
     def init(self):
         self.cur_step = -1
@@ -1394,16 +1448,26 @@ class VRPEnvBase(Env):
         if self.cur_step == self.max_num_steps:
             self.done = True
 
-        if self.done:
-            # if the action given in t-1 was terminate, or cur_step == T
-            # then the reward is cost(S[t-1])
-            reward = -self.best_state.get_cost(exclude_depot=False)
+        delta = self.best_state.get_cost(exclude_depot=False)
+        if self.reward_mode == VRPReward.FINAL_COST:
+            if self.done:
+                # if the action given in t-1 was terminate, or cur_step == T
+                # then the reward is cost(S[t-1])
+                reward = -self.best_state.get_cost(exclude_depot=False)
+            else:
+                move = action['move']
+                self.state.apply_move(move)
+                reward = 0.
+                if self.state.get_cost(exclude_depot=False) < self.best_state.get_cost(exclude_depot=False):
+                    self.best_state = copy.deepcopy(self.state)
         else:
-            move = action['move']
-            self.state.apply_move(move)
-            reward = 0.
-            if self.state.get_cost(exclude_depot=False) < self.best_state.get_cost(exclude_depot=False):
-                self.best_state = copy.deepcopy(self.state)
+            if not self.done:
+                move = action['move']
+                self.state.apply_move(move)
+                if self.state.get_cost(exclude_depot=False) < self.best_state.get_cost(exclude_depot=False):
+                    self.best_state = copy.deepcopy(self.state)
+            delta -= self.best_state.get_cost(exclude_depot=False)
+            reward = delta
 
         return self.get_state(), reward, self.done
 
@@ -1488,6 +1552,7 @@ class VRPEnvRandom(VRPEnvBase):
 class VRPMultiEnvAbstract(Env):
     def __init__(
         self,
+        reward_mode: VRPReward,
         num_nodes=10,
         max_num_steps=50,
         max_tour_demand=10.,
@@ -1499,7 +1564,12 @@ class VRPMultiEnvAbstract(Env):
         self.num_envs = num_samples_per_instance * num_instance_per_batch
         self.max_num_steps = max_num_steps
         self.max_tour_demand = max_tour_demand
-        self.envs = make_mp_envs(num_env=self.num_envs, num_steps=max_num_steps, max_tour_demand=max_tour_demand)
+        self.envs = make_mp_envs(
+            num_env=self.num_envs,
+            num_steps=max_num_steps,
+            max_tour_demand=max_tour_demand,
+            reward_mode=reward_mode
+        )
 
         self.num_nodes = num_nodes
         self.seed = seed
@@ -1552,6 +1622,9 @@ class VRPMultiEnvAbstract(Env):
 
     def get_state(self):
         return self.envs.get_state()
+
+    def get_instance(self):
+        return self.envs.get_instance()
 
 
 class VRPMultiRandomEnv(VRPMultiEnvAbstract):

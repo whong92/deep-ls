@@ -19,7 +19,36 @@ from multiprocessing import pool
 
 from torch.optim import Adam
 import numpy as np
-from deepls.agent import AverageStateRewardBaselineAgent
+from deepls.agent import AverageStateRewardBaselineAgent, GRCNCriticBaselineAgent
+
+
+class VRPValueNet(nn.Module):
+    def __init__(self, config, device):
+        super().__init__()
+        config = copy.deepcopy(config)
+        config['num_edge_cat_features'] = 2
+        # consider consolidating with TSPGRCNValueNet since below line is the only difference
+        config['node_dim'] = 3  # x, y, demand
+        self.device = device
+        self.rgcn = ResidualGatedGCNModel(config)
+        self.hidden_dim = config['hidden_dim']
+        self.value_net = torch.nn.Sequential(
+            MLP(self.hidden_dim, self.hidden_dim, output_dim=1),
+        )
+
+    def forward(self, x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour):
+        """
+        x_edges: b x v x v
+        x_edges_values: b x v x v
+        x_nodes_coord: b x v x 2
+        x_tour: b x v x v
+        """
+        x_cat = torch.stack([x_tour, x_best_tour], dim=3)
+        x_emb, e_emb = self.rgcn(x_cat, x_edges_values, x_nodes_coord)
+        x_emb = self.value_net(x_emb).squeeze(-1) # b x v x 1
+        value = torch.mean(x_emb, dim=1)
+        return value
+
 
 class VRPActionNet(nn.Module):
     def __init__(self, config, device):
@@ -284,7 +313,7 @@ class VRPActionNet(nn.Module):
             e_emb,
             edges_vect_all, nodes_vect_all, first_move_nbhs
         )
-        actions_0, moves_0, pi_0, _ = self.sample_moves_given_logits(first_move_logits, first_move_nbhs, device=self.device)
+        actions_0, moves_0, pi_0, _ = self.sample_moves_given_logits(first_move_logits, first_move_nbhs, device=self.device, greedy=False)
         # print(moves_0)
         # reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list = self._get_second_move_nbh(
         #     states, moves_0
@@ -298,7 +327,7 @@ class VRPActionNet(nn.Module):
         # assert False
         second_moves_logits_padded, second_move_list = \
             self.get_second_move_logits(e_emb, reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list)
-        actions_1, moves_1, pi_1, _ = self.sample_moves_given_logits(second_moves_logits_padded, second_move_list, device=self.device)
+        actions_1, moves_1, pi_1, _ = self.sample_moves_given_logits(second_moves_logits_padded, second_move_list, device=self.device, greedy=False)
         # print(moves_1)
         #
         actions = torch.stack([actions_0, actions_1], dim=1)
@@ -539,7 +568,6 @@ class ActionNetRunner:
 class AverageStateRewardBaselineAgentVRP(AverageStateRewardBaselineAgent):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.moving_avg = None
 
     def _agent_init(self, agent_config):
         self.agent_config = copy.deepcopy(agent_config)
@@ -569,6 +597,53 @@ class AverageStateRewardBaselineAgentVRP(AverageStateRewardBaselineAgent):
         average_returns = torch.cat([e['cache']['average_return'] for e in experiences], dim=0)
         average_returns = average_returns[perm]
         return average_returns
+
+
+class CriticBaselineAgentVRP(GRCNCriticBaselineAgent):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def _agent_init(self, agent_config):
+        self.agent_config = copy.deepcopy(agent_config)
+        model_config = agent_config['model']
+        optimizer_config = agent_config['optim']
+        device = agent_config.get('device', 'cpu')
+        self.device = device
+
+        self.net = VRPActionNet(model_config, device).to(device)
+        self.optimizer = Adam(
+            self.net.parameters(),
+            lr=optimizer_config['step_size'],
+            betas=(optimizer_config['beta_m'], optimizer_config['beta_v']),
+            eps=optimizer_config['epsilon']
+        )
+        self.action_net_runner = ActionNetRunner(self.net, device)
+
+        self.value_net_type = model_config.get('value_net_type', 'normal')
+        if self.value_net_type == 'normal':
+            self.critic_baseline = VRPValueNet(model_config, device).to(self.device)
+            self.critic_loss = torch.nn.HuberLoss(delta=0.2).to(self.device)
+        elif self.value_net_type == 'lognormal':
+            raise ValueError("LogNormal Value Net not supported")
+        else:
+            raise ValueError(f"value_net_type not recognized: {self.value_net_type}")
+
+        self.critic_optimizer = Adam(
+            self.critic_baseline.parameters(),
+            lr=optimizer_config['step_size_critic'],
+            betas=(optimizer_config['beta_m'], optimizer_config['beta_v']),
+            eps=optimizer_config['epsilon']
+        )
+        self.dont_optimize_policy_steps = model_config.get('dont_optimize_policy_steps', 0)
+        self.critic_loss_val = None
+        self.critic_abs_err = None
+
+        self.policy_optimize_every = agent_config['policy_optimize_every']
+        self.critic_optimize_every = agent_config['critic_optimize_every']
+        self.minibatch_size = agent_config['minibatch_sz']
+        self.use_ppo_update = agent_config.get('use_ppo_update', False)
+        self.entropy_bonus = agent_config.get('entropy_bonus', 0.)
+        self.greedy = False
 
 
 VRP_STANDARD_PROBLEM_CONF = {
@@ -603,6 +678,8 @@ if __name__ == "__main__":
         'batch_sz': 64,
         'minibatch_sz': 32,
         'policy_optimize_every': 2,
+        'critic_optimize_every': 1,
+        'dont_optimize_policy_steps': 1000,
         'model': {
             "node_dim": 2,
             "voc_edges_in": 3,

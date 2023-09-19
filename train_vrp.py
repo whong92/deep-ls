@@ -7,9 +7,10 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv
-from deepls.vrp_gcn_model import AverageStateRewardBaselineAgentVRP, VRP_STANDARD_PROBLEM_CONF
-
+from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPReward
+from deepls.vrp_gcn_model import (
+    AverageStateRewardBaselineAgentVRP, VRP_STANDARD_PROBLEM_CONF, CriticBaselineAgentVRP
+)
 
 font = cv2.FONT_HERSHEY_COMPLEX_SMALL
 
@@ -28,26 +29,45 @@ VRP_SIZE_TO_VAL_DATA_F = {
 
 VRP_SIZE_TO_RUN_SCHED = {
     10: {
-        'runs': [0, 2000, 5000, 8000],
-        'episode_lens': [2, 4, 10, 20],
-        'run_lens': [5, 5, 2, 2],
+        'runs': [0, 2000, 5000],
+        'episode_lens': [2, 4, 10],
+        'run_lens': [5, 5, 2],
     },
     20: {
-        'runs': [0, 2000, 5000],
-        'episode_lens': [4, 8, 16],
-        'run_lens': [5, 5, 5],
+        'runs': [0, 2000],
+        'episode_lens': [4, 8],
+        'run_lens': [5, 5],
     },
     # schedule for 50 nodes (after 20 node pretrain)
     50: {
-        'runs': [0, 2000, 5000],
-        'episode_lens': [10, 20, 40],
-        'run_lens': [5, 5, 5],
+        'runs': [0, 2000],
+        'episode_lens': [10, 20],
+        'run_lens': [5, 5],
     },
     # 'run_sched': {
     #     'runs': [0, 2500, 5000, 7500],
     #     'episode_lens': [25, 50, 50, 100],
     #     'run_lens': [4, 2, 4, 2],
     # },
+}
+
+VRP_SIZE_TO_RUN_SCHED_SS = {
+    10: {
+        'runs': [0],
+        'episode_lens': [10],
+        'run_lens': [2],
+    },
+    20: {
+        'runs': [0],
+        'episode_lens': [8],
+        'run_lens': [5],
+    },
+    # schedule for 50 nodes (after 20 node pretrain)
+    50: {
+        'runs': [0],
+        'episode_lens': [20],
+        'run_lens': [5],
+    },
 }
 
 
@@ -113,12 +133,18 @@ def run_experiment(
 
     max_tour_demand = VRP_STANDARD_PROBLEM_CONF[problem_sz]['capacity']
 
-    run_sched = RunSched(**VRP_SIZE_TO_RUN_SCHED[problem_sz])
+    ramp_up = experiment_config.get('ramp_up', True)
+    if ramp_up:
+        run_sched = RunSched(**VRP_SIZE_TO_RUN_SCHED[problem_sz])
+    else:
+        run_sched = RunSched(**VRP_SIZE_TO_RUN_SCHED_SS[problem_sz])
     model_ckpt = experiment_config.get('model_ckpt')
     num_samples_per_instance = experiment_config['num_samples_per_instance']
+    num_instance_per_batch = experiment_config['num_instance_per_batch']
     val_every = experiment_config['val_every']
     start_run = experiment_config['start_run']
     train_runs = experiment_config['train_runs']
+    reward_mode = experiment_config['reward_mode']
 
     agent_config = experiment_config['agent_config']
 
@@ -128,7 +154,8 @@ def run_experiment(
         max_num_steps=problem_sz,
         max_tour_demand=max_tour_demand,
         num_samples_per_instance=num_samples_per_instance,
-        num_instance_per_batch=1
+        num_instance_per_batch=num_instance_per_batch,
+        reward_mode=reward_mode
     )
     env.reset()
 
@@ -143,6 +170,7 @@ def run_experiment(
     # env_val.reset()
 
     agent = AverageStateRewardBaselineAgentVRP()
+    # agent = CriticBaselineAgentVRP()
     agent.agent_init(agent_config)
     if model_ckpt is not None:
         agent.load(model_ckpt, init_config=False)
@@ -241,11 +269,14 @@ if __name__ == "__main__":
         # after how many episodes do we optimize policy / critic?
         'policy_optimize_every': 2,
         'critic_optimize_every': 1,
+        # only useful for critic baseline models
+        'dont_optimize_policy_steps': 5000,
         # this doesn't work well - PPO's lower bound surrogate loss isn't as effective as the exact PG loss
         # we don't have a convergence issue anyways, so this was purely for intellectual interest
         'use_ppo_update': False,
         # use for initial pre-train only
         'entropy_bonus': 0.0,
+        'gamma': 0.99,
         # architecture settings
         'model': {
             "node_dim": 2,
@@ -258,7 +289,7 @@ if __name__ == "__main__":
         },
         'optim': {
             'step_size': 1e-4,
-            'step_size_critic': 2e-4,
+            'step_size_critic': 5e-4,
             'beta_m': 0.9,
             'beta_v': 0.999,
             'epsilon': 1e-8
@@ -267,10 +298,13 @@ if __name__ == "__main__":
     }
 
     experiment_config = {
-        'problem_sz': 20,
-        'experiment_name': '10-nodes-chunked-episodes',
-        'model_ckpt': None,
+        'ramp_up': False,
+        'problem_sz': 10,
+        'experiment_name': '10-nodes-chunked-episodes-delta-reward',
+        'model_ckpt': f'{args.modelroot}/vrp-10-nodes-chunked-episodes/model-03000-val--0.185.ckpt',
         'num_samples_per_instance': 12,
+        'num_instance_per_batch': 1,
+        'reward_mode': VRPReward.DELTA_COST,
         'val_every': 500,
         'start_run': 0,
         'train_runs': 10000,
