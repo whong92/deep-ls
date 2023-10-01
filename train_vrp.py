@@ -200,7 +200,7 @@ def run_experiment(
                 env.reset_episode()
 
             states = env.get_state()
-            actions = agent.agent_start(states)
+            actions = agent.agent_start(states, env)
             while True:
                 # Take a random action
                 # this return format is different from TSP's
@@ -224,7 +224,7 @@ def run_experiment(
                         avg_train_opt_gaps_ma.append(moving_avg_train_opt_gap)
                     break
                 else:
-                    actions = agent.agent_step(rewards, states)
+                    actions = agent.agent_step(rewards, states, env)
 
         if irun % val_every == 0:
             agent.save(

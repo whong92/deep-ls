@@ -193,7 +193,7 @@ class REINFORCEAgent(BaseAgent):
         self.batch_size = agent_config['batch_sz']
         self.gamma = agent_config.get('gamma', 1.0)
 
-    def agent_start(self, state):
+    def agent_start(self, state, env=None):
         """The first method called when the experiment starts, called after
         the environment starts.
         Args:
@@ -204,11 +204,11 @@ class REINFORCEAgent(BaseAgent):
         self.episode_steps = 0
         self.episode += 1
         self.last_state = copy.deepcopy(state)
-        self.last_action, self.last_cache = self.policy(self.last_state)
+        self.last_action, self.last_cache = self.policy(self.last_state, env)
         return self.last_action
 
     @abstractmethod
-    def policy(self, state):
+    def policy(self, state, env=None):
         """
         run this with provided state to get action
         """
@@ -222,7 +222,7 @@ class REINFORCEAgent(BaseAgent):
         raise NotImplementedError
 
     # weights update using optimize_network, and updating last_state and last_action (~5 lines).
-    def agent_step(self, reward, state):
+    def agent_step(self, reward, state, env=None):
         """A step taken by the agent.
         Args:
             reward (Sequence[float]): the rewards received for taking the last action taken
@@ -247,7 +247,7 @@ class REINFORCEAgent(BaseAgent):
                 self.last_cache
             )
         # Select action
-        action, cache = self.policy(state)
+        action, cache = self.policy(state, env=env)
 
         # Update the last state and last action.
         self.last_state = copy.deepcopy(state)
@@ -700,11 +700,11 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
         self.greedy = greedy
         self.net.set_greedy(greedy)
 
-    def policy(self, states):
+    def policy(self, states, env=None):
         """
         run this with provided state to get action
         """
-        return self.action_net_runner.policy(states)
+        return self.action_net_runner.policy(states, env)
 
     def agent_optimize(self, experiences):
         """

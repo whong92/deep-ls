@@ -11,7 +11,8 @@ from deepls.VRPState import (
     embed_reloc_heuristic,
     get_edge_embs,
     get_node_embs,
-    vectorize_reloc_moves, vectorize_cross_moves, vectorize_twopt_moves
+    vectorize_reloc_moves, vectorize_cross_moves, vectorize_twopt_moves,
+    VRPMultiEnvAbstract
 )
 from typing import List, Optional, Dict, Any, Tuple
 from torch.distributions import categorical as tdc
@@ -243,24 +244,24 @@ class VRPActionNet(nn.Module):
             second_move_list.append(nbh.second_moves)
         return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list
 
-    @staticmethod
-    def _make_second_moves_from_states(
-        states: List[VRPState],
-        nbhs: List[VRPNbHAutoReg],
-        moves_0: List
-    ):
-        reloc_nbh_vects = []
-        cross_nbh_vects = []
-        two_opt_nbh_vects = []
-        second_move_list = []
-        for state, nbh, move_0 in zip(states, nbhs, moves_0):
-            nbh.reloc_nbh_vect, nbh.cross_nbh_vect, nbh.twp_opt_nbh_vect, nbh.second_moves = \
-                nbh._get_second_move_nbh(state, move_0)
-            reloc_nbh_vects.append(nbh.reloc_nbh_vect)
-            cross_nbh_vects.append(nbh.cross_nbh_vect)
-            two_opt_nbh_vects.append(nbh.twp_opt_nbh_vect)
-            second_move_list.append(nbh.second_moves)
-        return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list
+    # @staticmethod
+    # def _make_second_moves_from_states(
+    #     states: List[VRPState],
+    #     nbhs: List[VRPNbHAutoReg],
+    #     moves_0: List
+    # ):
+    #     reloc_nbh_vects = []
+    #     cross_nbh_vects = []
+    #     two_opt_nbh_vects = []
+    #     second_move_list = []
+    #     for state, nbh, move_0 in zip(states, nbhs, moves_0):
+    #         nbh.reloc_nbh_vect, nbh.cross_nbh_vect, nbh.twp_opt_nbh_vect, nbh.second_moves = \
+    #             nbh._get_second_move_nbh(state, move_0)
+    #         reloc_nbh_vects.append(nbh.reloc_nbh_vect)
+    #         cross_nbh_vects.append(nbh.cross_nbh_vect)
+    #         two_opt_nbh_vects.append(nbh.twp_opt_nbh_vect)
+    #         second_move_list.append(nbh.second_moves)
+    #     return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list
 
     @staticmethod
     def _make_second_move_from_state(
@@ -290,6 +291,25 @@ class VRPActionNet(nn.Module):
             second_move_list.append(nbh.second_moves)
         return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list
 
+    def _make_second_moves_multiproc_env(
+        self,
+        moves_0: List,
+        nbhs: List[VRPNbHAutoReg],
+        envs: VRPMultiEnvAbstract
+    ):
+        reloc_nbh_vects = []
+        cross_nbh_vects = []
+        two_opt_nbh_vects = []
+        second_move_list = []
+        results = envs.get_second_moves(moves_0)
+        for nbh, result in zip(nbhs, results):
+            nbh.reloc_nbh_vect, nbh.cross_nbh_vect, nbh.twp_opt_nbh_vect, nbh.second_moves = result
+            reloc_nbh_vects.append(nbh.reloc_nbh_vect)
+            cross_nbh_vects.append(nbh.cross_nbh_vect)
+            two_opt_nbh_vects.append(nbh.twp_opt_nbh_vect)
+            second_move_list.append(nbh.second_moves)
+        return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list
+
     def forward_autoreg(
         self,
         x_edges,
@@ -298,6 +318,7 @@ class VRPActionNet(nn.Module):
         x_tour,
         x_best_tour,
         states: List[VRPState],
+        envs: VRPMultiEnvAbstract
     ):
         x_cat = torch.stack([x_tour, x_best_tour], dim=3)
         x_emb, e_emb = self.rgcn(x_cat, x_edges_values, x_nodes_coord)
@@ -305,7 +326,7 @@ class VRPActionNet(nn.Module):
         # TODO: feed this into move mlps, actually maybe no need? since it's always 1 anyways
         # ;max_demands = torch.as_tensor([state.max_tour_demand for state in states]).to(self.device)
         # copy the nbhs so we can modify it
-        nbhs = [copy.deepcopy(state.get_nbh()) for state in states]
+        nbhs = [state.get_nbh() for state in states]
 
         edges_vect_all, nodes_vect_all, first_move_nbhs = self._get_first_moves_from_nbhs(nbhs)
         first_move_logits, first_move_nbhs = self.get_first_move_logits(
@@ -321,8 +342,12 @@ class VRPActionNet(nn.Module):
         # TODO: use process pool to parallelize this maybe?
         # reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list = \
         #     self._make_second_moves_from_states(states, nbhs, moves_0)
+
+        # _reloc_nbh_vects, _cross_nbh_vects, _two_opt_nbh_vects, second_move_list = \
+        #     self._make_second_moves_multiproc(states, nbhs, moves_0)
+
         reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list = \
-            self._make_second_moves_multiproc(states, nbhs, moves_0)
+            self._make_second_moves_multiproc_env(moves_0, nbhs, envs)
 
         # assert False
         second_moves_logits_padded, second_move_list = \
@@ -386,9 +411,10 @@ class VRPActionNet(nn.Module):
         x_nodes_coord,
         x_tour,
         x_best_tour,
-        states: List[VRPState]
+        states: List[VRPState],
+        env
     ):
-        return self.forward_autoreg(x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, states)
+        return self.forward_autoreg(x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, states, env)
 
     def get_action_pref_autoreg(
         self,
@@ -479,7 +505,7 @@ def model_input_from_states(states: List[VRPState], best_states: List[VRPState])
         x_nodes_coord.append(
             torch.as_tensor(np.concatenate((node_coords, node_demands), axis=2)).to(torch.float)
         )
-        states_input.append(copy.deepcopy(state))
+        states_input.append(copy.deepcopy(state))  # states_input.append(VRPState.make_from_other_state(state))
     return (
         torch.cat(x_edges, dim=0),
         torch.cat(x_edges_values, dim=0),
@@ -498,7 +524,7 @@ class ActionNetRunner:
         self.net = net
         self.device = device
 
-    def policy(self, states: List[Tuple[VRPState, VRPState]]):
+    def policy(self, states: List[Tuple[VRPState, VRPState]], env):
         """
         :param states: sequence of tuple of 2 TSP2OptEnv states - the current state and the best state so far
         :return:
@@ -514,7 +540,7 @@ class ActionNetRunner:
 
         model_input = [x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour]
         with torch.no_grad():
-            moves, pis, action_idxs, nbhs = self.net(*[t.clone().to(self.device) for t in model_input] + [states_input])
+            moves, pis, action_idxs, nbhs = self.net(*[t.clone().to(self.device) for t in model_input] + [states_input], env)
         cache = {
             'model_input': model_input + [states_input],
             'action': action_idxs.detach().to('cpu'),

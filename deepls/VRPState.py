@@ -1225,6 +1225,9 @@ def worker(remote, parent_remote, env_fn):
         elif cmd == 'get_instance':
             remote.send(env.cur_instance)
 
+        elif cmd == 'get_second_move':
+            remote.send(env.get_second_move(data))
+
         # elif cmd == 'render':
         #     remote.send(env.render())
 
@@ -1337,6 +1340,15 @@ class SubprocVecEnv:
         states = [remote.recv() for remote in self.remotes]
         return states
 
+    def get_first_move_from_states(self):
+        pass
+
+    def get_second_move_from_states(self, moves_0):
+        for remote, move_0 in zip(self.remotes, moves_0):
+            remote.send(('get_second_move', move_0))
+        second_moves = [remote.recv() for remote in self.remotes]
+        return second_moves
+
     def get_instance(self):
         for remote in self.remotes:
             remote.send(('get_instance', (None,)))
@@ -1436,6 +1448,10 @@ class VRPEnvBase(Env):
         if self.ret_best_state:
             return (self.state, self.best_state)
         return self.state
+
+    def get_second_move(self, move_0):
+        nbh = self.state.get_nbh()
+        return nbh._get_second_move_nbh(self.state, move_0)
 
     def step(self, action: Dict):
         if self.done:
@@ -1625,6 +1641,9 @@ class VRPMultiEnvAbstract(Env):
 
     def get_instance(self):
         return self.envs.get_instance()
+
+    def get_second_moves(self, moves_0):
+        return self.envs.get_second_move_from_states(moves_0)
 
 
 class VRPMultiRandomEnv(VRPMultiEnvAbstract):
