@@ -300,8 +300,8 @@ if __name__ == "__main__":
     experiment_config = {
         'ramp_up': False,
         'problem_sz': 10,
-        'experiment_name': '10-nodes-chunked-episodes-delta-reward',
-        'model_ckpt': f'{args.modelroot}/vrp-10-nodes-chunked-episodes/model-03000-val--0.185.ckpt',
+        'experiment_name': '10-nodes-chunked-episodes-cost-emb-best-reward',
+        # 'model_ckpt': f'{args.modelroot}/vrp-10-nodes-chunked-episodes/model-03000-val--0.185.ckpt',
         'num_samples_per_instance': 12,
         'num_instance_per_batch': 1,
         'reward_mode': VRPReward.DELTA_COST,

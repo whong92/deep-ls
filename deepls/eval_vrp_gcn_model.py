@@ -1,5 +1,5 @@
 from deepls.vrp_gcn_model import AverageStateRewardBaselineAgentVRP, VRP_STANDARD_PROBLEM_CONF
-from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPState, VRPEnvBase
+from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPState, VRPEnvBase, VRPReward
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
@@ -44,7 +44,7 @@ if __name__=="__main__":
 
     agent = AverageStateRewardBaselineAgentVRP()
     agent.agent_init(agent_config)
-    agent.load(f'{workdir}/model/vrp-50-nodes-chunked-episodes-small-lr-fixed/model-02500-val-0.089.ckpt', init_config=False)
+    agent.load(f'{workdir}/model/vrp-50-nodes-chunked-episodes-delta-cost/model-02500-val-0.080.ckpt', init_config=False)
     agent.set_eval()
 
     envs = VRPMultiFileEnv(
@@ -53,7 +53,8 @@ if __name__=="__main__":
         max_num_steps=num_steps,
         max_tour_demand=max_tour_demand,
         num_samples_per_instance=1,
-        num_instance_per_batch=1
+        num_instance_per_batch=1,
+        reward_mode=VRPReward.DELTA_COST
     )
     pbar = tqdm(range(episodes))
     opt_gaps = 0.
@@ -63,14 +64,14 @@ if __name__=="__main__":
         step = 0
         # env.set_instance_as_state(instance, id=episode, max_num_steps=num_steps)
         states: List[Tuple[VRPState, VRPState]] = envs.reset(fetch_next=True)
-        actions = agent.agent_start(states)
+        actions = agent.agent_start(states, envs)
         init_cost = states[0][1].get_cost(exclude_depot=False)
         opt_cost = states[0][0].opt_tour_dist
         # plot_state(states[0][0], f'{workdir}/dump/episode_{episode:03d}_step_{step:03d}.jpg')
         while True:
             step += 1
             states, rewards, dones = envs.step(actions)
-            # plot_state(states[0][0], f'{workdir}/dump/episode_{episode:03d}_step_{step:03d}.jpg')
+            plot_state(states[0][0], f'{workdir}/dump/episode_{episode:03d}_step_{step:03d}.jpg')
             done = dones[0]
             if done:
                 agent.agent_end(rewards)
@@ -78,12 +79,13 @@ if __name__=="__main__":
             else:
                 actions = agent.agent_step(
                     rewards,
-                    states
+                    states,
+                    envs
                 )
 
         num_greedy_steps = 20
         cur_instances = envs.get_instance()
-        env_greedy = VRPEnvBase(max_num_steps=num_greedy_steps, max_tour_demand=max_tour_demand)
+        env_greedy = VRPEnvBase(max_num_steps=num_greedy_steps, max_tour_demand=max_tour_demand, reward_mode=VRPReward.DELTA_COST)
         state = states[0]
         env_greedy.set_instance_as_state(
             cur_instances[0],
@@ -94,7 +96,7 @@ if __name__=="__main__":
             if moves[0]['cost'] > 0:
                 break
             state, reward, done = env_greedy.step({'move': moves[0], 'terminate': False})
-            # plot_state(state[0], f'{workdir}/dump/episode_{episode:03d}_step_{step:03d}.jpg')
+            plot_state(state[0], f'{workdir}/dump/episode_{episode:03d}_step_{step:03d}.jpg')
             if done:
                 break
             else:

@@ -1010,6 +1010,9 @@ def vectorize_cross_moves(cross_moves):
                 normalize_edge(cross_move[key])
                 for cross_move in cross_moves
             ], axis=0)
+    vectorized['cost'] = np.array(
+        [reloc_move['cost'] for reloc_move in cross_moves]
+    )[:, None]
     return vectorized
 
 
@@ -1028,6 +1031,9 @@ def vectorize_reloc_moves(reloc_moves):
                 normalize_edge(reloc_move[key])
                 for reloc_move in reloc_moves
             ], axis=0)
+    vectorized['cost'] = np.array(
+        [reloc_move['cost'] for reloc_move in reloc_moves]
+    )[:, None]
     return vectorized
 
 
@@ -1046,10 +1052,13 @@ def vectorize_twopt_moves(twopt_moves):
                 normalize_edge(twopt_move[key])
                 for twopt_move in twopt_moves
             ], axis=0)
+    vectorized['cost'] = np.array(
+        [reloc_move['cost'] for reloc_move in twopt_moves]
+    )[:, None]
     return vectorized
 
 
-def embed_cross_heuristic(cross_moves_vectorized, edge_embeddings: torch.Tensor, cross_move_mlp: torch.nn.Module):
+def embed_cross_heuristic(cross_moves_vectorized, edge_embeddings: torch.Tensor, cross_move_mlp: torch.nn.Module, cost_mlp: torch.nn.Module):
     """
     list of list of cross moves
     for each state, flatten into a single e0, e1, e0p, e1p
@@ -1068,6 +1077,7 @@ def embed_cross_heuristic(cross_moves_vectorized, edge_embeddings: torch.Tensor,
     e1 = []
     e0p = []
     e1p = []
+    cost = []
     num_moves = []
     for i, m in enumerate(cross_moves_vectorized):
         num_moves_i = m['e0'].shape[0]
@@ -1076,6 +1086,7 @@ def embed_cross_heuristic(cross_moves_vectorized, edge_embeddings: torch.Tensor,
         e1.append(np.concatenate([batch_index, m['e1']], axis=1))
         e0p.append(np.concatenate([batch_index, m['e0p']], axis=1))
         e1p.append(np.concatenate([batch_index, m['e1p']], axis=1))
+        cost.append(m['cost'])
         num_moves.append(num_moves_i)
 
     # sum_b ( num_moves(b) )  x  3
@@ -1083,18 +1094,20 @@ def embed_cross_heuristic(cross_moves_vectorized, edge_embeddings: torch.Tensor,
     e1 = torch.as_tensor(np.concatenate(e1, axis=0)).long()
     e0p = torch.as_tensor(np.concatenate(e0p, axis=0)).long()
     e1p = torch.as_tensor(np.concatenate(e1p, axis=0)).long()
+    cost = torch.as_tensor(np.concatenate(cost, axis=0)).float().to(edge_embeddings.device)
     # sum_b ( num_moves(b) ) x 1
 
     edges = torch.stack([e0, e1, e0p, e1p], dim=0)
     edges_emb = get_edge_embs(edge_embeddings, edges, symmetric=True)
     # sum_b ( num_moves(b) )  x  3
     e0_emb, e1_emb, e0p_emb, e1p_emb = edges_emb[0], edges_emb[1], edges_emb[2], edges_emb[3]
+    cost_emb = cost_mlp(cost)
 
     # MLP the embeddings into a single embedding
-    # sum_b ( num_moves(b) ) x (4 * h)
-    cross_move_input_emb = torch.cat([e0_emb, e1_emb, e0p_emb, e1p_emb], dim=1)
-    # MLP input dim is 4 x h output dim is h
-    # sum_b ( num_moves(b) ) x (4 * h)
+    # sum_b ( num_moves(b) ) x (5 * h)
+    cross_move_input_emb = torch.cat([e0_emb, e1_emb, e0p_emb, e1p_emb, cost_emb], dim=1)
+    # MLP input dim is 5 x h output dim is h
+    # sum_b ( num_moves(b) ) x (5 * h)
     cross_move_embeddings = cross_move_mlp(cross_move_input_emb)
     # split it into a list of tensors using num_moves
     assert cross_move_embeddings.shape[0] == sum(num_moves)
@@ -1103,7 +1116,7 @@ def embed_cross_heuristic(cross_moves_vectorized, edge_embeddings: torch.Tensor,
     return cross_move_embeddings
 
 
-def embed_reloc_heuristic(reloc_moves_vectorized, edge_embeddings: torch.Tensor, reloc_move_mlp: torch.nn.Module):
+def embed_reloc_heuristic(reloc_moves_vectorized, edge_embeddings: torch.Tensor, reloc_move_mlp: torch.nn.Module, cost_mlp: torch.nn.Module):
     """
     list of list of cross moves
     for each state, flatten into a single e0, e1, e0p, e1p
@@ -1125,6 +1138,7 @@ def embed_reloc_heuristic(reloc_moves_vectorized, edge_embeddings: torch.Tensor,
     src_vp = []
     dst_wp = []
     num_moves = []
+    cost = []
     for i, m in enumerate(reloc_moves_vectorized):
         num_moves_i = m['src_u'].shape[0]
         batch_index = i * np.ones(shape=(num_moves_i, 1))
@@ -1134,6 +1148,7 @@ def embed_reloc_heuristic(reloc_moves_vectorized, edge_embeddings: torch.Tensor,
         src_up.append(np.concatenate([batch_index, m['src_up']], axis=1))
         src_vp.append(np.concatenate([batch_index, m['src_vp']], axis=1))
         dst_wp.append(np.concatenate([batch_index, m['dst_wp']], axis=1))
+        cost.append(m['cost'])
         num_moves.append(num_moves_i)
 
     # sum_b ( num_moves(b) )  x  3
@@ -1143,6 +1158,7 @@ def embed_reloc_heuristic(reloc_moves_vectorized, edge_embeddings: torch.Tensor,
     src_up = torch.as_tensor(np.concatenate(src_up, axis=0)).long()
     src_vp = torch.as_tensor(np.concatenate(src_vp, axis=0)).long()
     dst_wp = torch.as_tensor(np.concatenate(dst_wp, axis=0)).long()
+    cost = torch.as_tensor(np.concatenate(cost, axis=0)).float().to(edge_embeddings.device)
     # sum_b ( num_moves(b) ) x 1
 
     edges = torch.stack([
@@ -1160,10 +1176,11 @@ def embed_reloc_heuristic(reloc_moves_vectorized, edge_embeddings: torch.Tensor,
     # sum_b ( num_moves(b) )  x  3
     src_u_emb,src_v_emb, dst_w_emb, src_up_emb, src_vp_emb, dst_wp_emb = \
         edges_emb[0], edges_emb[1], edges_emb[2], edges_emb[3], edges_emb[4], edges_emb[5]
+    cost_emb = cost_mlp(cost)
 
     # MLP the embeddings into a single embedding
     # sum_b ( num_moves(b) ) x (6 * h)
-    reloc_move_input_emb = torch.cat([src_u_emb, src_v_emb, dst_w_emb, src_up_emb, src_vp_emb, dst_wp_emb], dim=1)
+    reloc_move_input_emb = torch.cat([src_u_emb, src_v_emb, dst_w_emb, src_up_emb, src_vp_emb, dst_wp_emb, cost_emb], dim=1)
     # MLP input dim is 4 x h output dim is h
     # sum_b ( num_moves(b) ) x (4 * h)
     reloc_move_embeddings = reloc_move_mlp(reloc_move_input_emb)

@@ -68,14 +68,20 @@ class VRPActionNet(nn.Module):
             L=3
         )
 
+        self.cost_mlp = MLP(
+            input_dim=1,
+            hidden_dim=self.hidden_dim,
+            output_dim=self.hidden_dim,
+            L=1
+        )
         self.cross_mlp = MLP(
-            input_dim=4 * self.hidden_dim,
+            input_dim=(4 + 1) * self.hidden_dim,
             hidden_dim=self.hidden_dim,
             output_dim=self.hidden_dim,
             L=1
         )
         self.reloc_mlp = MLP(
-            input_dim=6 * self.hidden_dim,
+            input_dim=(6 + 1) * self.hidden_dim,
             hidden_dim=self.hidden_dim,
             output_dim=self.hidden_dim,
             L=1
@@ -178,17 +184,20 @@ class VRPActionNet(nn.Module):
         reloc_moves_embedded = embed_reloc_heuristic(
             reloc_moves_vectorized=reloc_nbh_vects,
             edge_embeddings=e_emb,
-            reloc_move_mlp=self.reloc_mlp
+            reloc_move_mlp=self.reloc_mlp,
+            cost_mlp=self.cost_mlp
         )
         cross_moves_embedded = embed_cross_heuristic(
             cross_moves_vectorized=cross_nbh_vects,
             edge_embeddings=e_emb,
-            cross_move_mlp=self.cross_mlp
+            cross_move_mlp=self.cross_mlp,
+            cost_mlp=self.cost_mlp
         )
         two_opt_moves_embedded = embed_cross_heuristic(
             cross_moves_vectorized=twp_opt_nbh_vects,
             edge_embeddings=e_emb,
-            cross_move_mlp=self.cross_mlp
+            cross_move_mlp=self.cross_mlp,
+            cost_mlp=self.cost_mlp
         )
         all_moves_embedded = [
             torch.cat([r, c, t], dim=0)
