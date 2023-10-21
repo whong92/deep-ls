@@ -34,13 +34,13 @@ VRP_SIZE_TO_RUN_SCHED = {
         'run_lens': [5, 5, 2],
     },
     20: {
-        'runs': [0, 2000],
-        'episode_lens': [4, 8],
-        'run_lens': [5, 5],
+        'runs': [0, 2500, 5000],
+        'episode_lens': [5, 10, 20],
+        'run_lens': [4, 4, 2],
     },
     # schedule for 50 nodes (after 20 node pretrain)
     50: {
-        'runs': [0, 2000],
+        'runs': [0, 5000],
         'episode_lens': [10, 20],
         'run_lens': [5, 5],
     },
@@ -59,14 +59,14 @@ VRP_SIZE_TO_RUN_SCHED_SS = {
     },
     20: {
         'runs': [0],
-        'episode_lens': [8],
-        'run_lens': [5],
+        'episode_lens': [20],
+        'run_lens': [2],
     },
     # schedule for 50 nodes (after 20 node pretrain)
     50: {
         'runs': [0],
-        'episode_lens': [20],
-        'run_lens': [5],
+        'episode_lens': [50],
+        'run_lens': [2],
     },
 }
 
