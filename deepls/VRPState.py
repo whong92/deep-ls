@@ -356,6 +356,11 @@ def apply_relocate_move(
     return new_tour_0, new_tour_1, new_tour_0_pos, new_tour_1_pos
 
 
+class VRPInitTour(Enum):
+    SINGLETON = 'SINGETON'
+    MAX_CAP_RANDOM = 'MAX_CAP_RANDOM'
+
+
 class VRPState:
     # WLOG, demands should be scaled appropriately
     VEHICLE_CAPACITY = 1.0
@@ -373,6 +378,7 @@ class VRPState:
         tours_init: Optional[List[np.ndarray]] = None,
         id=None,
         opt_tour_dist: Optional[float] = None,
+        init_tour: VRPInitTour = VRPInitTour.SINGLETON
     ):
         self.nodes_coord = nodes_coord
         self.edge_weights = euclidean_distances(nodes_coord)
@@ -381,6 +387,7 @@ class VRPState:
         self.N = len(self.nodes_coord) - 1
         self.id = id
         self.opt_tour_dist = opt_tour_dist
+        self.init_tour = init_tour
 
         if tours_init:
             assert sum([len(tour) for tour in tours_init]) == self.N
@@ -397,15 +404,39 @@ class VRPState:
                     'cum_dems': tour_nodes_to_cum_demands(tour, self.node_demands)
                 }
         else:
-            # every node will have its own tour
             self.tours = {}
-            for i in range(1, self.N + 1):
-                tour = np.array([0, i, -1])
-                self.tours[i - 1] = {
-                    'tour': tour,
-                    'node_pos': tour_nodes_to_node_rep(tour),
-                    'cum_dems': tour_nodes_to_cum_demands(tour, self.node_demands)
-                }
+            if self.init_tour == VRPInitTour.SINGLETON:
+                # every node will have its own tour
+                for i in range(1, self.N + 1):
+                    tour = np.array([0, i, -1])
+                    self.tours[i - 1] = {
+                        'tour': tour,
+                        'node_pos': tour_nodes_to_node_rep(tour),
+                        'cum_dems': tour_nodes_to_cum_demands(tour, self.node_demands)
+                    }
+            elif self.init_tour == VRPInitTour.MAX_CAP_RANDOM:
+                nodes_remaining = np.random.permutation(np.arange(1, self.N + 1))
+                tours_init = []
+                while len(nodes_remaining) > 0:
+                    tour_init = []
+                    target_demand = np.random.uniform(np.min(self.node_demands), self.max_tour_demand)
+                    tour_demand = 0.
+                    while len(nodes_remaining) > 0:
+                        if (tour_demand + self.node_demands[nodes_remaining[0] - 1]) <= target_demand:
+                            tour_init.append(nodes_remaining[0])
+                            nodes_remaining = nodes_remaining[1:]
+                            tour_demand += self.node_demands[tour_init[-1] - 1]
+                        else:
+                            break
+                    tours_init.append(np.array(tour_init))
+                for tour_idx, tour in enumerate(tours_init):
+                    tour = np.insert(tour, 0, 0)
+                    tour = np.insert(tour, len(tour), -1)
+                    self.tours[tour_idx] = {
+                        'tour': tour,
+                        'node_pos': tour_nodes_to_node_rep(tour),
+                        'cum_dems': tour_nodes_to_cum_demands(tour, self.node_demands)
+                    }
         self.nbh = self.make_nbh()
 
     def all_tours_as_list(self, remove_last_depot=False, remove_first_depot=False):
@@ -1196,10 +1227,11 @@ import copy
 import cloudpickle
 
 
-def worker(remote, parent_remote, env_fn):
+def worker(remote, parent_remote, env_fn, env_idx):
     parent_remote.close()
     env: VRPEnvBase = env_fn()
     env.init()
+    np.random.seed(env_idx)
 
     cur_instance = None
     cur_instance_id = None
@@ -1274,13 +1306,14 @@ class CloudpickleWrapper(object):
         return self.x()
 
 
-def make_mp_envs(num_env, num_steps, max_tour_demand, reward_mode):
+def make_mp_envs(num_env, num_steps, max_tour_demand, reward_mode, initializer):
     def make_env():
         def fn():
             env = VRPEnvBase(
                 max_num_steps=num_steps,
                 max_tour_demand=max_tour_demand,
-                reward_mode=reward_mode
+                reward_mode=reward_mode,
+                initializer=initializer
             )
             return env
         return fn
@@ -1296,9 +1329,9 @@ class SubprocVecEnv:
             zip(*[Pipe() for _ in range(self.no_of_envs)])
         self.ps = []
 
-        for wrk, rem, fn in zip(self.work_remotes, self.remotes, env_fns):
+        for env_idx, (wrk, rem, fn) in enumerate(zip(self.work_remotes, self.remotes, env_fns)):
             proc = Process(target=worker,
-                           args=(wrk, rem, CloudpickleWrapper(fn)))
+                           args=(wrk, rem, CloudpickleWrapper(fn), env_idx))
             self.ps.append(proc)
 
         for p in self.ps:
@@ -1397,6 +1430,7 @@ class VRPEnvBase(Env):
         max_num_steps=50,
         ret_best_state=True,
         max_tour_demand=10.,
+        initializer: VRPInitTour = VRPInitTour.SINGLETON
     ):
         super(VRPEnvBase, self).__init__()
         # config vars
@@ -1406,6 +1440,7 @@ class VRPEnvBase(Env):
         # this is the original representation of the problem before any fudging
         self.cur_instance = None
         self.reward_mode = reward_mode
+        self.initializer = initializer
 
     def init(self):
         self.cur_step = -1
@@ -1420,7 +1455,8 @@ class VRPEnvBase(Env):
             max_tour_demand=VRPState.VEHICLE_CAPACITY,
             # opt_tour=b['tour_nodes'][0],  # TODO: optimal tour
             id=id,
-            opt_tour_dist=b.get('opt_dist')
+            opt_tour_dist=b.get('opt_dist'),
+            init_tour=self.initializer
         )
 
     def set_instance_as_state(
@@ -1592,7 +1628,8 @@ class VRPMultiEnvAbstract(Env):
         ret_opt_tour=False,
         num_samples_per_instance=1,
         num_instance_per_batch=1,
-        seed=42
+        seed=42,
+        initializer=VRPInitTour.SINGLETON
     ):
         self.num_envs = num_samples_per_instance * num_instance_per_batch
         self.max_num_steps = max_num_steps
@@ -1601,7 +1638,8 @@ class VRPMultiEnvAbstract(Env):
             num_env=self.num_envs,
             num_steps=max_num_steps,
             max_tour_demand=max_tour_demand,
-            reward_mode=reward_mode
+            reward_mode=reward_mode,
+            initializer=initializer
         )
 
         self.num_nodes = num_nodes

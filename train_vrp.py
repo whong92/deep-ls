@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPReward
+from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPReward, VRPInitTour
 from deepls.vrp_gcn_model import (
     AverageStateRewardBaselineAgentVRP, VRP_STANDARD_PROBLEM_CONF, CriticBaselineAgentVRP
 )
@@ -34,7 +34,7 @@ VRP_SIZE_TO_RUN_SCHED = {
         'run_lens': [5, 5, 2],
     },
     20: {
-        'runs': [0, 2500, 5000],
+        'runs': [0, 4000, 8000],
         'episode_lens': [5, 10, 20],
         'run_lens': [4, 4, 2],
     },
@@ -145,6 +145,7 @@ def run_experiment(
     start_run = experiment_config['start_run']
     train_runs = experiment_config['train_runs']
     reward_mode = experiment_config['reward_mode']
+    initializer = experiment_config['initializer']
 
     agent_config = experiment_config['agent_config']
 
@@ -155,7 +156,8 @@ def run_experiment(
         max_tour_demand=max_tour_demand,
         num_samples_per_instance=num_samples_per_instance,
         num_instance_per_batch=num_instance_per_batch,
-        reward_mode=reward_mode
+        reward_mode=reward_mode,
+        initializer=initializer
     )
     env.reset()
 
@@ -305,6 +307,7 @@ if __name__ == "__main__":
         'num_samples_per_instance': 12,
         'num_instance_per_batch': 1,
         'reward_mode': VRPReward.DELTA_COST,
+        'initializer': VRPInitTour.MAX_CAP_RANDOM,
         'val_every': 500,
         'start_run': 0,
         'train_runs': 10000,
