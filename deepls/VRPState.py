@@ -1718,6 +1718,7 @@ class VRPMultiRandomEnv(VRPMultiEnvAbstract):
 
 
 import pickle
+import random
 class VRPMultiFileEnv(VRPMultiEnvAbstract):
     def __init__(self, data_f, results_f=None, *args, **kwargs):
         self.data_f = data_f
@@ -1728,13 +1729,15 @@ class VRPMultiFileEnv(VRPMultiEnvAbstract):
     def init(self):
         with open(self.data_f, 'rb') as fp:
             self.data = pickle.load(fp)
+        random.shuffle(self.data)
         self.data_iter = self.data.__iter__()
 
     def get_next_instance(self):
         try:
             instance = next(self.data_iter)
         except StopIteration as e:
-            self.data_iter = self.data_iter.__iter__()
+            random.shuffle(self.data)
+            self.data_iter = self.data.__iter__()
             instance = next(self.data_iter)
 
         # format it properly

@@ -1,5 +1,5 @@
 from deepls.vrp_gcn_model import AverageStateRewardBaselineAgentVRP, VRP_STANDARD_PROBLEM_CONF
-from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPState, VRPEnvBase, VRPReward
+from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPState, VRPEnvBase, VRPReward, VRPInitTour
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
@@ -44,7 +44,7 @@ if __name__=="__main__":
 
     agent = AverageStateRewardBaselineAgentVRP()
     agent.agent_init(agent_config)
-    agent.load(f'{workdir}/model/vrp-50-nodes-chunked-episodes-delta-cost/model-02500-val-0.080.ckpt', init_config=False)
+    agent.load(f'{workdir}/model/vrp-50-nodes-chunked-episodes-cost-emb-delta-cost-longer-eps/model-03000-val-0.094.ckpt', init_config=False)
     agent.set_eval()
 
     envs = VRPMultiFileEnv(
@@ -52,9 +52,10 @@ if __name__=="__main__":
         num_nodes=N,
         max_num_steps=num_steps,
         max_tour_demand=max_tour_demand,
-        num_samples_per_instance=1,
+        num_samples_per_instance=5,
         num_instance_per_batch=1,
-        reward_mode=VRPReward.DELTA_COST
+        reward_mode=VRPReward.DELTA_COST,
+        initializer=VRPInitTour.MAX_CAP_RANDOM
     )
     pbar = tqdm(range(episodes))
     opt_gaps = 0.
