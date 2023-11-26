@@ -10,6 +10,7 @@ from deepls.tsp_gcn_model import model_input_from_states, get_edge_quad_embs, TS
     TSPRGCNActionNet
 from deepls.graph_utils import tour_nodes_to_W
 from deepls.TSP2OptEnv import TSP2OptState
+from deepls.VRPState import VRPState
 from torch.optim import Adam
 
 
@@ -96,9 +97,8 @@ class LRPCache:
             return self.cache.popitem(last=False)
         return None
 
-
 class ExperienceBuffer:
-    def __init__(self, size):
+    def __init__(self, size, copy: bool = True):
         """
         Experience buffer for episodic MDP's
         Args:
@@ -109,6 +109,7 @@ class ExperienceBuffer:
         self.max_size = size
         self.num_steps = [0]
         self.size = 0  # total number of steps
+        self.copy = copy
 
     def append(self, episode, state, action, reward, terminal, next_state, timestep, cache):
         """
@@ -126,16 +127,26 @@ class ExperienceBuffer:
             popped_item = self.buffer.put(episode, [])
             if popped_item is not None:
                 self.size -= len(popped_item[1])
-
-        self.buffer.get(episode).append({
-            'state': copy.deepcopy(state),
-            'action': copy.deepcopy(action),
-            'reward': copy.deepcopy(reward),
-            'terminal': copy.deepcopy(terminal),
-            'next_state': copy.deepcopy(next_state),
-            'ts': copy.deepcopy(timestep),
-            'cache': copy.deepcopy(cache)
-        })
+        if self.copy:
+            self.buffer.get(episode).append({
+                'state': copy.deepcopy(state),
+                'action': copy.deepcopy(action),
+                'reward': copy.deepcopy(reward),
+                'terminal': copy.deepcopy(terminal),
+                'next_state': copy.deepcopy(next_state),
+                'ts': copy.deepcopy(timestep),
+                'cache': copy.deepcopy(cache)
+            })
+        else:
+            self.buffer.get(episode).append({
+                'state': state,
+                'action': action,
+                'reward': reward,
+                'terminal': terminal,
+                'next_state': next_state,
+                'ts': timestep,
+                'cache': cache,
+            })
         self.size += 1
 
     def flush(self):

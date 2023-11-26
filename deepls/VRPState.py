@@ -370,6 +370,18 @@ class VRPState:
             return np.concatenate((np.array([0.]), self.node_demands))
         return self.node_demands
 
+    @classmethod
+    def copy_construct(cls, other: 'VRPState'):
+        return VRPState(
+            other.nodes_coord,
+            other.node_demands,
+            other.max_tour_demand,
+            tours_init=other.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+            id=other.id,
+            opt_tour_dist=other.opt_tour_dist,
+            init_tour=other.init_tour
+        )
+
     def __init__(
         self,
         nodes_coord: np.ndarray,  # depot is always node 0,

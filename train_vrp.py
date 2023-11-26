@@ -30,8 +30,8 @@ VRP_SIZE_TO_VAL_DATA_F = {
 VRP_SIZE_TO_RUN_SCHED = {
     10: {
         'runs': [0, 2000, 5000],
-        'episode_lens': [2, 4, 10],
-        'run_lens': [5, 5, 2],
+        'episode_lens': [5, 5, 10],
+        'run_lens': [2, 4, 2],
     },
     20: {
         'runs': [0, 4000, 8000],
@@ -306,8 +306,8 @@ if __name__ == "__main__":
         # 'model_ckpt': f'{args.modelroot}/vrp-10-nodes-chunked-episodes/model-03000-val--0.185.ckpt',
         'num_samples_per_instance': 12,
         'num_instance_per_batch': 1,
-        'reward_mode': VRPReward.DELTA_COST,
-        'initializer': VRPInitTour.MAX_CAP_RANDOM,
+        'reward_mode': VRPReward.FINAL_COST,
+        'initializer': VRPInitTour.SINGLETON,
         'val_every': 500,
         'start_run': 0,
         'train_runs': 10000,

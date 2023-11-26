@@ -156,6 +156,7 @@ class VRPActionNet(nn.Module):
         pi = tour_dist.log_prob(actions.to(device))  # b
         ent = tour_dist.entropy()
         # convert action indices into the action actions_0
+        # these can be replaced by chosen moves
         moves = [nbh[action_idx] for action_idx, nbh in zip(actions, moves)]
         return actions, moves, pi, ent
 
@@ -442,7 +443,7 @@ class VRPActionNet(nn.Module):
         x_emb, e_emb = self.rgcn(x_cat, x_edges_values, x_nodes_coord)
 
         # TODO: feed this into move mlps
-        max_demands = torch.as_tensor([state.max_tour_demand for state in states]).to(self.device)
+        # max_demands = torch.as_tensor([state.max_tour_demand for state in states]).to(self.device)
 
         edges_vect_all, nodes_vect_all, first_move_nbhs = self._get_first_moves_from_nbhs(nbhs)
         first_move_logits, first_move_nbhs = self.get_first_move_logits(
@@ -514,7 +515,7 @@ def model_input_from_states(states: List[VRPState], best_states: List[VRPState])
         x_nodes_coord.append(
             torch.as_tensor(np.concatenate((node_coords, node_demands), axis=2)).to(torch.float)
         )
-        states_input.append(copy.deepcopy(state))  # states_input.append(VRPState.make_from_other_state(state))
+        states_input.append(state)
     return (
         torch.cat(x_edges, dim=0),
         torch.cat(x_edges_values, dim=0),
@@ -599,8 +600,156 @@ class ActionNetRunner:
         )
         return h_sa, h_sa_old.to(self.device), ent
 
+from deepls.agent import BaseAgent, ExperienceBuffer, iter_over_tensor_minibatch, PPO_EPS
+import pandas as pd
 
-class AverageStateRewardBaselineAgentVRP(AverageStateRewardBaselineAgent):
+class AverageStateRewardBaselineAgentVRP(BaseAgent):
+
+    def init_replay_buffer(self, replay_buffer_size):
+        # initialize replay buffer
+        self.replay_buffer = ExperienceBuffer(replay_buffer_size, copy=False)
+
+    def agent_init(self, agent_config={}):
+        """Setup variables to track state
+        """
+        self.last_state = None
+        self.last_action = None
+        self.last_cache = None  # anything that needs caching for timestep t-1
+
+        self.episode_steps = 0
+        self.episode = -1
+
+        self.train = True  # whether or not to perform optimization
+
+        self._agent_init(agent_config)
+        self.init_replay_buffer(agent_config['replay_buffer_size'])
+        self.batch_size = agent_config['batch_sz']
+        self.gamma = agent_config.get('gamma', 1.0)
+
+        self.states = []
+        self.actions = []
+        self.caches = []
+        self.rewards = []
+
+
+    def agent_start(self, state, env=None):
+        """The first method called when the experiment starts, called after
+        the environment starts.
+        Args:
+            state (Sequence[TSP2OptState]): the (multi)state from the environment's evn_start function.
+        Returns:
+            The first action the agent takes.
+        """
+        self.episode_steps = 0
+        self.episode += 1
+
+        self.states = []
+        self.actions = []
+        self.caches = []
+        self.rewards = []
+
+        self.last_state = state
+        self.states.append(self.last_state)
+        self.last_action, self.last_cache = self.policy(self.last_state, env)
+        self.actions.append(self.last_action)
+        self.caches.append(self.last_cache)
+        return self.last_action
+
+
+    # weights update using optimize_network, and updating last_state and last_action (~5 lines).
+    def agent_step(self, reward, state, env=None):
+        """A step taken by the agent.
+        Args:
+            reward (Sequence[float]): the rewards received for taking the last action taken
+            state (Sequence[TSP2OptState]): the (multi)state from the
+                environment's step based, where the agent ended up after the
+                last step
+        Returns:
+            The action the agent is taking.
+        """
+        self.episode_steps += 1
+        self.rewards.append(reward)
+        # Select action
+        action, cache = self.policy(state, env=env)
+
+        # Update the last state and last action.
+        self.last_state = state
+        self.last_action = action
+        self.last_cache = cache
+
+        self.states.append(self.last_state)
+        self.actions.append(self.last_action)
+        self.caches.append(self.last_cache)
+
+        return action
+
+    def set_train(self):
+        self.train = True
+
+    def set_eval(self):
+        self.train = False
+
+    def agent_end(self, reward):
+        """Run when the agent terminates.
+        Args:
+            reward (Sequence[float]): the rewards the agent received for entering the
+                terminal state.
+        """
+        self.episode_steps += 1
+
+        if self.train:
+            for s, (_state, _next_state, _action, _reward, _cache) in enumerate(
+                zip(self.states[:-1], self.states[1:], self.actions, self.rewards, self.caches), start=1
+            ):
+                self.replay_buffer.append(
+                    self.episode,
+                    _state,
+                    _action,
+                    _reward,
+                    False,
+                    None, # _next_state,
+                    s,
+                    _cache
+                )
+            # Append new experience to replay buffer
+            self.replay_buffer.append(
+                self.episode,
+                self.last_state,
+                self.last_action,
+                reward,
+                True,
+                None,
+                self.episode_steps,
+                self.last_cache
+            )
+
+            # compute returns - no discounting for now
+            experience = self.replay_buffer.get_episode(self.episode)
+            # building the discount matrix
+            # B x n_steps
+            reward = torch.as_tensor([step['reward'] for step in experience]).T
+
+            n_steps = reward.shape[1]
+            gamma = self.gamma
+            d_r0 = torch.pow(gamma, torch.arange(0, n_steps))
+            d_mat = torch.zeros(size=(n_steps, n_steps))
+
+            for r in range(n_steps):
+                d_mat[r, r:] = d_r0[:n_steps - r]
+            # B x n_steps x n_steps (to sum over)
+            rewards_mat = reward[:, None, :] * d_mat[None, :, :]
+            returns = torch.sum(rewards_mat, dim=2).T  # n_steps x B
+
+            for ret, step in zip(returns, experience):
+                state_ids = np.array([state[0].id for state in step['state']])
+                df = pd.DataFrame({'state_ids': state_ids, 'returns': ret.numpy()})
+                avg_ret = np.array(df.groupby('state_ids', as_index=False).returns.transform(np.mean).returns)
+                step['cache']['return'] = ret
+                step['cache']['average_return'] = torch.as_tensor(avg_ret)
+            # Perform replay steps:
+            experiences_dict = self.replay_buffer.sample_experience(self.replay_buffer.get_size())
+            self.agent_optimize(experiences_dict)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -632,6 +781,81 @@ class AverageStateRewardBaselineAgentVRP(AverageStateRewardBaselineAgent):
         average_returns = torch.cat([e['cache']['average_return'] for e in experiences], dim=0)
         average_returns = average_returns[perm]
         return average_returns
+
+    def save(self, path):
+        bla = {
+            'agent_config': self.agent_config,
+            'net': self.net.state_dict(),
+            'optimizer': self.optimizer.state_dict()
+        }
+        torch.save(bla, path)
+        
+    def load(self, path, init_config=True, load_optim=True, device=None):
+        if device is not None:
+            self.device = device
+        bla = torch.load(path, map_location=self.device)
+        agent_config = bla['agent_config']
+        agent_config['device'] = self.device
+        if init_config:
+            self.agent_init(agent_config)
+        self.net.load_state_dict(bla['net'], strict=False)
+        if load_optim:
+            self.optimizer.load_state_dict(bla['optimizer'])
+
+    def agent_optimize(self, experiences):
+        """
+        run this with provided experiences to run one step of optimization
+        """
+        optimize_policy = (self.episode % self.policy_optimize_every == 0) \
+                          and (self.episode > self.dont_optimize_policy_steps)
+
+        # always try and get an estimate of the critic abs_err
+        returns = torch.cat([e['cache']['return'] for e in experiences], dim=0).float()
+        if len(returns) < self.batch_size:
+            return
+        perm = np.random.choice(len(returns), self.batch_size, replace=False)
+        returns = returns[perm]
+        baseline = self.compute_baseline(experiences, perm)
+        self.critic_abs_err = torch.abs(baseline - returns).mean().detach().to('cpu')
+
+        if optimize_policy:
+            self.optimizer.zero_grad()
+            for (minibatch_perm, minibatch_returns, minibatch_baseline), weight in \
+                    iter_over_tensor_minibatch(perm, returns, baseline, minibatch_size=self.minibatch_size):
+                action_pref_output = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
+                td_err = (minibatch_returns.clone() - minibatch_baseline.detach()).to(self.device)
+
+                h_sa = action_pref_output[0]
+                h_sa_old = action_pref_output[1]
+                if len(action_pref_output) > 2:
+                    policy_entropy = action_pref_output[2]
+                else:
+                    policy_entropy = 0.
+                if self.use_ppo_update:
+                    # PPO update
+                    ratio = torch.exp(h_sa - h_sa_old)
+                    policy_loss_p1 = -td_err * ratio
+                    policy_loss_p2 = -td_err * torch.clip(ratio, 1. - PPO_EPS, 1. + PPO_EPS)
+                    policy_loss = torch.maximum(policy_loss_p1, policy_loss_p2).mean() * weight
+                else:
+                    # regular PG update
+                    eligibility_loss = -h_sa  # NLL loss
+                    # entropy bonus
+                    beta = self.entropy_bonus
+                    # TODO: discounting!(?)
+                    policy_loss = (td_err * eligibility_loss - beta * policy_entropy).mean() * weight
+                policy_loss.backward()
+            self.optimizer.step()
+
+    def set_greedy(self, greedy=False):
+        self.greedy = greedy
+        self.net.set_greedy(greedy)
+
+    def policy(self, states, env=None):
+        """
+        run this with provided state to get action
+        """
+        return self.action_net_runner.policy(states, env)
 
 
 class CriticBaselineAgentVRP(GRCNCriticBaselineAgent):
