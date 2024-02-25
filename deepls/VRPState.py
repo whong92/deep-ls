@@ -1,6 +1,7 @@
 import numpy as np
 from typing import List, Optional, Dict, Tuple, Any, Union
 import random
+import vrpstate
 
 from datetime import datetime
 import torch
@@ -799,6 +800,24 @@ def flatten_deduplicate_reloc_nbh(
                     "cost": cost
                 }
                 reloc_nbhs_dict[nbh_norm] = nb
+
+    # import random
+    # if random.uniform(0, 1.) < 0.05:
+    #     print(reloc_nbhs)
+    #     print(state.tours)
+    #     print(state.edge_weights)
+    #     import pickle
+    #     import uuid
+    #     with open(f"example_flatten_reloc_inputs/dummy_flatten_deduplicate_reloc_nbh_inputs_{uuid.uuid4()}.pkl",
+    #               "wb") as fp:
+    #         pickle.dump({
+    #             'reloc_nbhs': reloc_nbhs,
+    #             'state.node_demands': state.node_demands,
+    #             'state.tours': state.tours,
+    #             'state.edge_weights': state.edge_weights,
+    #             'state.max_tour_demand': state.max_tour_demand,
+    #             'deduped_reloc': reloc_nbhs_dict
+    #         }, fp)
     return reloc_nbhs_dict
 
 
@@ -881,6 +900,26 @@ def flatten_deduplicate_cross_nbh(
                 }
                 cross_nbh_dict[nbh_norm] = nb
 
+    # import random
+    # if random.uniform(0, 1.) < 0.01:
+    #     print(cross_nbhs)
+    #     print(state.node_demands)
+    #     print(state.tours)
+    #     print(state.edge_weights)
+    #     print(state.max_tour_demand)
+    #     import pickle
+    #     import uuid
+    #     with open(f"example_flatten_cross_inputs/dummy_flatten_deduplicate_cross_nbh_inputs_{uuid.uuid4()}.pkl",
+    #               "wb") as fp:
+    #         pickle.dump({
+    #             'cross_nbhs': cross_nbhs,
+    #             'state.node_demands': state.node_demands,
+    #             'state.tours': state.tours,
+    #             'state.edge_weights': state.edge_weights,
+    #             'state.max_tour_demand': state.max_tour_demand,
+    #             'deduped_cross': cross_nbh_dict
+    #         }, fp)
+
     return cross_nbh_dict
 
 
@@ -920,6 +959,22 @@ def flatten_deduplicate_2opt_nbh(
                     "cost": cost
                 }
                 two_opt_nbh_dict[nbh_norm] = nb
+
+    # import random
+    # if random.uniform(0, 1.) < 0.01:
+    #     print(twoopt_nbhs)
+    #     print(state.tours)
+    #     print(state.edge_weights)
+    #     import pickle
+    #     import uuid
+    #     with open(f"example_flatten_twoopt_inputs/dummyoopt_nbh_inputs_{uuid.uuid4()}.pkl",
+    #               "wb") as fp:
+    #         pickle.dump({
+    #             'twoopt_nbhs': twoopt_nbhs,
+    #             'state.tours': state.tours,
+    #             'state.edge_weights': state.edge_weights,
+    #             'deduped_cross': two_opt_nbh_dict
+    #         }, fp)
 
     return two_opt_nbh_dict
 
@@ -975,7 +1030,14 @@ class VRPNbHAutoReg:
             reloc_nbh = enumerate_relocate_neighborhood_given(
                 node, node_tour, node_pos, self.tour_edges
             )
-            reloc_nbh = flatten_deduplicate_reloc_nbh(reloc_nbh, state=state)
+            # reloc_nbh = flatten_deduplicate_reloc_nbh(reloc_nbh, state=state)
+            reloc_nbh = vrpstate.flatten_reloc_nbh(
+                reloc_nbh,
+                state.tours,
+                state.node_demands,
+                state.edge_weights,
+                state.max_tour_demand
+            )
             reloc_nbh = list(reloc_nbh.values())
             second_moves = reloc_nbh
 
@@ -985,8 +1047,20 @@ class VRPNbHAutoReg:
             edge_tour = move_0['tour_idx']
             cross_nbh = enumerate_cross_neighborhood_given(edge_tour, edge, self.tour_edges)
             two_opt_nbh = enumerate_2_opt_neighborhood_given(edge_tour, edge, self.tour_edges)
-            cross_nbh = flatten_deduplicate_cross_nbh(cross_nbhs=cross_nbh, state=state)
-            two_opt_nbh = flatten_deduplicate_2opt_nbh(two_opt_nbh, state=state)
+            # cross_nbh = flatten_deduplicate_cross_nbh(cross_nbhs=cross_nbh, state=state)
+            # two_opt_nbh = flatten_deduplicate_2opt_nbh(two_opt_nbh, state=state)
+            cross_nbh = vrpstate.flatten_cross_nbh(
+                cross_nbh,
+                state.tours,
+                state.node_demands,
+                state.edge_weights,
+                state.max_tour_demand
+            )
+            two_opt_nbh = vrpstate.flatten_2opt_nbh(
+                two_opt_nbh,
+                state.tours,
+                state.edge_weights,
+            )
 
             cross_nbh = list(cross_nbh.values())
             two_opt_nbh = list(two_opt_nbh.values())
@@ -1049,10 +1123,22 @@ def vectorize_cross_moves(cross_moves):
         if len(cross_moves) == 0:
             vectorized[key] = np.empty(shape=(0, 2))
         else:
-            vectorized[key] = np.stack([
-                normalize_edge(cross_move[key])
-                for cross_move in cross_moves
-            ], axis=0)
+            vectorized[key] = np.zeros(shape=(len(cross_moves), 2), dtype=int)
+            for i, cross_move in enumerate(cross_moves):
+                edge = cross_move[key]
+                e0, e1 = edge
+                if e0 == -1:
+                    e0 = 0
+                if e1 == -1:
+                    e1 = 0
+                if e0 > e1:
+                    e0, e1 = e1, e0
+                vectorized[key][i, 0] = e0
+                vectorized[key][i, 1] = e1
+            # vectorized[key] = np.stack([
+            #     normalize_edge(np.array(cross_move[key]))
+            #     for cross_move in cross_moves
+            # ], axis=0)
     vectorized['cost'] = np.array(
         [reloc_move['cost'] for reloc_move in cross_moves]
     )[:, None]
@@ -1070,10 +1156,22 @@ def vectorize_reloc_moves(reloc_moves):
         if len(reloc_moves) == 0:
             vectorized[key] = np.empty(shape=(0, 2))
         else:
-            vectorized[key] = np.stack([
-                normalize_edge(reloc_move[key])
-                for reloc_move in reloc_moves
-            ], axis=0)
+            vectorized[key] = np.zeros(shape=(len(reloc_moves), 2), dtype=int)
+            for i, reloc_move in enumerate(reloc_moves):
+                edge = reloc_move[key]
+                e0, e1 = edge
+                if e0 == -1:
+                    e0 = 0
+                if e1 == -1:
+                    e1 = 0
+                if e0 > e1:
+                    e0, e1 = e1, e0
+                vectorized[key][i, 0] = e0
+                vectorized[key][i, 1] = e1
+            # vectorized[key] = np.stack([
+            #     normalize_edge(np.array(reloc_move[key]))
+            #     for reloc_move in reloc_moves
+            # ], axis=0)
     vectorized['cost'] = np.array(
         [reloc_move['cost'] for reloc_move in reloc_moves]
     )[:, None]
@@ -1091,10 +1189,22 @@ def vectorize_twopt_moves(twopt_moves):
         if len(twopt_moves) == 0:
             vectorized[key] = np.empty(shape=(0, 2))
         else:
-            vectorized[key] = np.stack([
-                normalize_edge(twopt_move[key])
-                for twopt_move in twopt_moves
-            ], axis=0)
+            vectorized[key] = np.zeros(shape=(len(twopt_moves), 2), dtype=int)
+            for i, twopt_move in enumerate(twopt_moves):
+                edge = twopt_move[key]
+                e0, e1 = edge
+                if e0 == -1:
+                    e0 = 0
+                if e1 == -1:
+                    e1 = 0
+                if e0 > e1:
+                    e0, e1 = e1, e0
+                vectorized[key][i, 0] = e0
+                vectorized[key][i, 1] = e1
+            # vectorized[key] = np.stack([
+            #     normalize_edge(np.array(twopt_move[key]))
+            #     for twopt_move in twopt_moves
+            # ], axis=0)
     vectorized['cost'] = np.array(
         [reloc_move['cost'] for reloc_move in twopt_moves]
     )[:, None]
@@ -1575,17 +1685,21 @@ class VRPEnvRandom(VRPEnvBase):
 
     def __init__(
         self,
+        reward_mode: VRPReward,
         num_nodes=10,
         max_num_steps=10,
         ret_best_state=True,
         max_tour_demand=10.,
         ret_opt_tour=False,
+        initializer=VRPInitTour.SINGLETON,
         seed=42
     ):
         super().__init__(
             max_num_steps=max_num_steps,
             ret_best_state=ret_best_state,
-            max_tour_demand=max_tour_demand
+            max_tour_demand=max_tour_demand,
+            initializer=initializer,
+            reward_mode=reward_mode,
         )
         # config vars
         self.num_nodes = num_nodes
@@ -1602,8 +1716,8 @@ class VRPEnvRandom(VRPEnvBase):
         """
         self.set_instance_as_state(
             self.cur_instance,
-            init_tour=self.state.all_tours_as_list(remove_last_depot=False),
-            best_tour=self.best_state.all_tours_as_list(remove_last_depot=False),
+            init_tour=self.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+            best_tour=self.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
             id=self.state.id,
             ret_opt_tour=self.ret_opt_tour
         )
@@ -1628,6 +1742,9 @@ class VRPEnvRandom(VRPEnvBase):
             max_num_steps=max_num_steps
         )
         return self.get_state()
+
+    def get_second_moves(self, move_0):
+        return [self.get_second_move(move_0[0])]
 
 
 class VRPMultiEnvAbstract(Env):

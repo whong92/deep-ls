@@ -228,7 +228,7 @@ def run_experiment(
                 else:
                     actions = agent.agent_step(rewards, states, env)
 
-        if irun % val_every == 0:
+        if (irun % val_every == 0) and (irun > 0):
             agent.save(
                 f'{model_root}'
                 f'/model-{irun:05d}-'
@@ -301,16 +301,16 @@ if __name__ == "__main__":
 
     experiment_config = {
         'ramp_up': False,
-        'problem_sz': 10,
-        'experiment_name': '10-nodes-chunked-episodes-cost-emb-best-reward',
-        # 'model_ckpt': f'{args.modelroot}/vrp-10-nodes-chunked-episodes/model-03000-val--0.185.ckpt',
+        'problem_sz': 50,
+        'experiment_name': '50-nodes-profiling',
+        'model_ckpt': f'{args.modelroot}/vrp-50-nodes-chunked-episodes-cost-emb-delta-cost-longer-eps/model-03000-val-0.094.ckpt',
         'num_samples_per_instance': 12,
         'num_instance_per_batch': 1,
         'reward_mode': VRPReward.FINAL_COST,
         'initializer': VRPInitTour.SINGLETON,
         'val_every': 500,
         'start_run': 0,
-        'train_runs': 10000,
+        'train_runs': 10,
         'agent_config': agent_config,
         'model_root': args.modelroot,
         'data_root': args.dataroot
