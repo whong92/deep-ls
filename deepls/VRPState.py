@@ -1020,55 +1020,68 @@ class VRPNbHAutoReg:
     def _get_second_move_nbh(
         self,
         state: VRPState,
-        move_0,
+        moves_0,
+        actions_top_k_0: np.ndarray  # k
     ):
+        reloc_nbhs = []
+        cross_nbhs = []
+        twoopt_nbhs = []
         second_moves = []
-        if move_0['type'] == 'node':
-            node = move_0['node']
-            node_tour = move_0['tour_idx']
-            node_pos = self.tours[node_tour]['node_pos'][node]
-            reloc_nbh = enumerate_relocate_neighborhood_given(
-                node, node_tour, node_pos, self.tour_edges
-            )
-            # reloc_nbh = flatten_deduplicate_reloc_nbh(reloc_nbh, state=state)
-            reloc_nbh = vrpstate.flatten_reloc_nbh(
-                reloc_nbh,
-                state.tours,
-                state.node_demands,
-                state.edge_weights,
-                state.max_tour_demand
-            )
-            reloc_nbh = list(reloc_nbh.values())
-            second_moves = reloc_nbh
+        selected_first_actions_k = []
+        for i, (action_0, move_0) in enumerate(zip(actions_top_k_0, moves_0)):
+            _second_moves = []
+            if move_0['type'] == 'node':
+                node = move_0['node']
+                node_tour = move_0['tour_idx']
+                node_pos = self.tours[node_tour]['node_pos'][node]
+                _reloc_nbh = enumerate_relocate_neighborhood_given(
+                    node, node_tour, node_pos, self.tour_edges
+                )
+                _reloc_nbh = flatten_deduplicate_reloc_nbh(_reloc_nbh, state=state)
+                # _reloc_nbh = vrpstate.flatten_reloc_nbh(
+                #     _reloc_nbh,
+                #     state.tours,
+                #     state.node_demands,
+                #     state.edge_weights,
+                #     state.max_tour_demand
+                # )
+                _reloc_nbh = list(_reloc_nbh.values())
+                reloc_nbhs.extend(_reloc_nbh)
+                _second_moves.extend(_reloc_nbh)
+                # reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves(_reloc_nbh, [], [])
+            elif move_0['type'] == 'edge':
+                edge = move_0['edge']
+                edge_tour = move_0['tour_idx']
+                _cross_nbh = enumerate_cross_neighborhood_given(edge_tour, edge, self.tour_edges)
+                _two_opt_nbh = enumerate_2_opt_neighborhood_given(edge_tour, edge, self.tour_edges)
+                _cross_nbh = flatten_deduplicate_cross_nbh(cross_nbhs=_cross_nbh, state=state)
+                _two_opt_nbh = flatten_deduplicate_2opt_nbh(_two_opt_nbh, state=state)
+                # _cross_nbh = vrpstate.flatten_cross_nbh(
+                #     _cross_nbh,
+                #     state.tours,
+                #     state.node_demands,
+                #     state.edge_weights,
+                #     state.max_tour_demand
+                # )
+                # _two_opt_nbh = vrpstate.flatten_2opt_nbh(
+                #     _two_opt_nbh,
+                #     state.tours,
+                #     state.edge_weights,
+                # )
 
-            reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves(reloc_nbh, [], [])
-        elif move_0['type'] == 'edge':
-            edge = move_0['edge']
-            edge_tour = move_0['tour_idx']
-            cross_nbh = enumerate_cross_neighborhood_given(edge_tour, edge, self.tour_edges)
-            two_opt_nbh = enumerate_2_opt_neighborhood_given(edge_tour, edge, self.tour_edges)
-            # cross_nbh = flatten_deduplicate_cross_nbh(cross_nbhs=cross_nbh, state=state)
-            # two_opt_nbh = flatten_deduplicate_2opt_nbh(two_opt_nbh, state=state)
-            cross_nbh = vrpstate.flatten_cross_nbh(
-                cross_nbh,
-                state.tours,
-                state.node_demands,
-                state.edge_weights,
-                state.max_tour_demand
+                _cross_nbh = list(_cross_nbh.values())
+                _two_opt_nbh = list(_two_opt_nbh.values())
+                cross_nbhs.extend(_cross_nbh)
+                twoopt_nbhs.extend(_two_opt_nbh)
+                _second_moves.extend(_cross_nbh + _two_opt_nbh)
+            selected_first_actions_k.append(
+                np.full(shape=(len(_second_moves)), fill_value=i, dtype=int)
             )
-            two_opt_nbh = vrpstate.flatten_2opt_nbh(
-                two_opt_nbh,
-                state.tours,
-                state.edge_weights,
-            )
+            second_moves.extend(_second_moves)
 
-            cross_nbh = list(cross_nbh.values())
-            two_opt_nbh = list(two_opt_nbh.values())
-
-            reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves([], cross_nbh, two_opt_nbh)
-            second_moves = cross_nbh + two_opt_nbh
-
-        return reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect, second_moves
+        selected_first_actions_k = np.concatenate(selected_first_actions_k, axis=0)
+        reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves(reloc_nbhs, cross_nbhs, twoopt_nbhs)
+        return reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect, second_moves, selected_first_actions_k
 
     def __init__(self, state: VRPState):
         self.tour_edges, _ = enumerate_all_tours_edges(
@@ -1083,6 +1096,7 @@ class VRPNbHAutoReg:
         self.cross_nbh_vect = None
         self.twp_opt_nbh_vect = None
         self.second_moves = None
+        self.selected_first_actions_k = None
 
 
 def get_edge_embs(e_emb: torch.Tensor, edges: torch.Tensor, symmetric=True) -> torch.Tensor:
@@ -1397,7 +1411,8 @@ def worker(remote, parent_remote, env_fn, env_idx):
             remote.send(env.cur_instance)
 
         elif cmd == 'get_second_move':
-            remote.send(env.get_second_move(data))
+            move_0, action_0 = data
+            remote.send(env.get_second_move(move_0, action_0))
 
         # elif cmd == 'render':
         #     remote.send(env.render())
@@ -1515,9 +1530,9 @@ class SubprocVecEnv:
     def get_first_move_from_states(self):
         pass
 
-    def get_second_move_from_states(self, moves_0):
-        for remote, move_0 in zip(self.remotes, moves_0):
-            remote.send(('get_second_move', move_0))
+    def get_second_move_from_states(self, moves_0, actions_0):
+        for remote, move_0, action_0 in zip(self.remotes, moves_0, actions_0):
+            remote.send(('get_second_move', (move_0, action_0)))
         second_moves = [remote.recv() for remote in self.remotes]
         return second_moves
 
@@ -1624,9 +1639,9 @@ class VRPEnvBase(Env):
             return (self.state, self.best_state)
         return self.state
 
-    def get_second_move(self, move_0):
+    def get_second_move(self, move_0, action_0):
         nbh = self.state.get_nbh()
-        return nbh._get_second_move_nbh(self.state, move_0)
+        return nbh._get_second_move_nbh(self.state, move_0, action_0)
 
     def step(self, action: Dict):
         if self.done:
@@ -1743,8 +1758,8 @@ class VRPEnvRandom(VRPEnvBase):
         )
         return self.get_state()
 
-    def get_second_moves(self, move_0):
-        return [self.get_second_move(move_0[0])]
+    def get_second_moves(self, move_0, action_0):
+        return [self.get_second_move(move_0[0], action_0[0])]
 
 
 class VRPMultiEnvAbstract(Env):
@@ -1826,8 +1841,8 @@ class VRPMultiEnvAbstract(Env):
     def get_instance(self):
         return self.envs.get_instance()
 
-    def get_second_moves(self, moves_0):
-        return self.envs.get_second_move_from_states(moves_0)
+    def get_second_moves(self, moves_0, actions_0: np.ndarray):
+        return self.envs.get_second_move_from_states(moves_0, actions_0)
 
 
 class VRPMultiRandomEnv(VRPMultiEnvAbstract):
