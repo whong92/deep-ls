@@ -370,7 +370,7 @@ class VRPActionNet(nn.Module):
             e_emb,
             edges_vect_all, nodes_vect_all, first_move_nbhs
         )
-        K = 2
+        K = 1
         actions_top_k_0, moves_top_k_0, pi_top_k_0, ent_top_k_0 = self.sample_moves_given_logits(
             first_move_logits, first_move_nbhs, device=self.device, greedy=False, K=K
         )
@@ -497,7 +497,7 @@ class VRPActionNet(nn.Module):
             e_emb,
             edges_vect_all, nodes_vect_all, first_move_nbhs
         )
-        K = 2
+        K = 1
         actions_top_k_0, moves_top_k_0, pi_top_k_0, ent_top_k_0 = self.sample_moves_given_logits(
             first_move_logits, first_move_nbhs, device=self.device, greedy=False, K=K, actions=actions[:, :K]
         )
