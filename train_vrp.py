@@ -1,6 +1,7 @@
 import argparse
 import os
 from dataclasses import dataclass
+import wandb
 
 import cv2
 import numpy as np
@@ -120,7 +121,8 @@ class RunSched:
 
 
 def run_experiment(
-    experiment_config
+    experiment_config,
+    wandb_module=None
 ):
     experiment_name = experiment_config.get('experiment_name', 'default')
     problem_sz = experiment_config['problem_sz']
@@ -208,20 +210,24 @@ def run_experiment(
                 # this return format is different from TSP's
                 states, rewards, dones = env.step(actions)
                 if dones[0] == True:
-                    agent.agent_end(rewards)
+                    metrics = agent.agent_end(rewards)
+                    if metrics and wandb_module is not None:
+                        wandb_module.log(metrics)
                     # if end of epoch
                     if run.is_end:
                         if agent.critic_abs_err is not None:
                             ve_error.append(torch.mean(agent.critic_abs_err).detach())
                         else:
                             ve_error.append(-1)
-                        train_opt_gap = np.mean([(state[1].get_cost() / state[0].opt_tour_dist) - 1. for state in states])
+                        train_opt_gaps = np.array([(state[1].get_cost() / state[0].opt_tour_dist) - 1. for state in states])
+                        train_opt_gap = np.mean(train_opt_gaps)
+                        train_opt_gap_std = np.std(train_opt_gaps)
+                        wandb_module.log({'opt_gap_mean': train_opt_gap, 'opt_gap_std': train_opt_gap_std})
 
                         if moving_avg_train_opt_gap is None:
                             moving_avg_train_opt_gap = train_opt_gap
                         else:
                             moving_avg_train_opt_gap = 0.9 * moving_avg_train_opt_gap + 0.1 * train_opt_gap
-
                         avg_train_opt_gaps.append(train_opt_gap)
                         avg_train_opt_gaps_ma.append(moving_avg_train_opt_gap)
                     break
@@ -272,12 +278,12 @@ if __name__ == "__main__":
         'policy_optimize_every': 2,
         'critic_optimize_every': 1,
         # only useful for critic baseline models
-        'dont_optimize_policy_steps': 5000,
+        'dont_optimize_policy_steps': 0,
         # this doesn't work well - PPO's lower bound surrogate loss isn't as effective as the exact PG loss
         # we don't have a convergence issue anyways, so this was purely for intellectual interest
         'use_ppo_update': False,
         # use for initial pre-train only
-        'entropy_bonus': 0.0,
+        'entropy_bonus': 0.02,
         'gamma': 0.99,
         # architecture settings
         'model': {
@@ -301,19 +307,29 @@ if __name__ == "__main__":
 
     experiment_config = {
         'ramp_up': False,
-        'problem_sz': 50,
-        'experiment_name': '50-nodes-profiling',
-        'model_ckpt': f'{args.modelroot}/vrp-50-nodes-chunked-episodes-cost-emb-delta-cost-longer-eps/model-03000-val-0.094.ckpt',
+        'problem_sz': 10,
+        'experiment_name': '10-nodes-profiling',
+        'model_ckpt': None, # f'{args.modelroot}/vrp-50-nodes-chunked-episodes-cost-emb-delta-cost-longer-eps/model-03000-val-0.094.ckpt',
         'num_samples_per_instance': 12,
         'num_instance_per_batch': 1,
         'reward_mode': VRPReward.FINAL_COST,
         'initializer': VRPInitTour.SINGLETON,
         'val_every': 500,
         'start_run': 0,
-        'train_runs': 10,
+        'train_runs': 1000,
         'agent_config': agent_config,
         'model_root': args.modelroot,
         'data_root': args.dataroot
     }
 
-    run_experiment(experiment_config)
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="train-vrp",
+
+        # track hyperparameters and run metadata
+        config=experiment_config
+    )
+
+    run_experiment(experiment_config, wandb_module=wandb)
+
+    wandb.finish()

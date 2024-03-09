@@ -831,7 +831,7 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
                 step['cache']['average_return'] = torch.as_tensor(avg_ret)
             # Perform replay steps:
             experiences_dict = self.replay_buffer.sample_experience(self.replay_buffer.get_size())
-            self.agent_optimize(experiences_dict)
+            return self.agent_optimize(experiences_dict)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -902,6 +902,13 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
         self.critic_abs_err = torch.abs(baseline - returns).mean().detach().to('cpu')
 
         if optimize_policy:
+            # metrics to log
+            policy_loss_accum = 0.
+            td_err_accum = 0.
+            ratio_accum = 0.
+            elig_loss_accum = 0.
+            policy_entropy_accum = 0.
+
             self.optimizer.zero_grad()
             for (minibatch_perm, minibatch_returns, minibatch_baseline), weight in \
                     iter_over_tensor_minibatch(perm, returns, baseline, minibatch_size=self.minibatch_size):
@@ -910,13 +917,16 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
 
                 h_sa = action_pref_output[0]
                 h_sa_old = action_pref_output[1]
+                ratio = torch.exp(h_sa - h_sa_old)
+                ratio_accum += torch.sum(ratio.cpu().detach())
+
                 if len(action_pref_output) > 2:
                     policy_entropy = action_pref_output[2]
+                    policy_entropy_accum += torch.sum(policy_entropy.cpu().detach())
                 else:
                     policy_entropy = 0.
                 if self.use_ppo_update:
                     # PPO update
-                    ratio = torch.exp(h_sa - h_sa_old)
                     policy_loss_p1 = -td_err * ratio
                     policy_loss_p2 = -td_err * torch.clip(ratio, 1. - PPO_EPS, 1. + PPO_EPS)
                     policy_loss = torch.maximum(policy_loss_p1, policy_loss_p2).mean() * weight
@@ -927,8 +937,23 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
                     beta = self.entropy_bonus
                     # TODO: discounting!(?)
                     policy_loss = (td_err * eligibility_loss - beta * policy_entropy).mean() * weight
+
+                policy_loss_accum += policy_loss.cpu().detach()
+                elig_loss_accum += torch.sum(h_sa.cpu().detach())
+                td_err_accum += torch.sum(td_err.cpu().detach())
+
                 policy_loss.backward()
+
+            metrics = {
+                'policy_loss_accum': float(policy_loss_accum),
+                'td_err_accum': float(td_err_accum / self.batch_size),
+                'ratio_accum': float(ratio_accum / self.batch_size),
+                'elig_loss_accum': float(elig_loss_accum / self.batch_size),
+                'policy_entropy_accum': float(policy_entropy_accum / self.batch_size),
+            }
+
             self.optimizer.step()
+            return metrics
 
     def set_greedy(self, greedy=False):
         self.greedy = greedy
