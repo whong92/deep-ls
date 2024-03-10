@@ -43,7 +43,7 @@ VRP_SIZE_TO_RUN_SCHED = {
     50: {
         'runs': [0, 5000],
         'episode_lens': [10, 20],
-        'run_lens': [5, 5],
+        'run_lens': [10, 5],
     },
     # 'run_sched': {
     #     'runs': [0, 2500, 5000, 7500],
@@ -325,7 +325,7 @@ if __name__ == "__main__":
     wandb.init(
         # set the wandb project where this run will be logged
         project="train-vrp",
-
+        name=experiment_config['experiment_name'],
         # track hyperparameters and run metadata
         config=experiment_config
     )

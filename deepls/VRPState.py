@@ -1,7 +1,7 @@
 import numpy as np
 from typing import List, Optional, Dict, Tuple, Any, Union
 import random
-import vrpstate
+
 
 from datetime import datetime
 import torch
