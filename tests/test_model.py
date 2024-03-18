@@ -1,5 +1,6 @@
 import pytest
-from deepls.tsp_gcn_model import model_input_from_states, sample_tour_logit, get_edge_quad_embs, TSPRGCNActionNet
+from deepls.tsp_gcn_model import \
+    model_input_from_states, sample_tour_logit, get_edge_quad_embs, TSPRGCNActionNet, normalize_edges_tour
 from tests.test_env import _make_random_state
 from deepls.TSP2OptEnv import TSP2OptState
 from deepls.graph_utils import tour_nodes_to_W
@@ -33,8 +34,7 @@ def test_tsp_rgcn(dummy_config):
     ], dim=0)
 
     batch_size, num_nodes, _ = x_edges.shape
-    x_cur_step = torch.ones(len(states), 1, dtype=torch.float)
-    edges_sampled, pis, _ = net(x_edges, x_edges_values, x_nodes_coord, x_tour, x_tour, x_tour_directed, x_cur_step)
+    edges_sampled, pis, _ = net(x_edges, x_edges_values, x_nodes_coord, x_tour, x_tour, x_tour_directed)
     assert edges_sampled.shape == torch.Size([batch_size, 2, 3])
     assert pis.shape == torch.Size([batch_size])
 
@@ -100,9 +100,62 @@ def compute_deltas_naive(tour_indices_cat, x_tour_directed, x_edges_values):
     return deltas
 
 
+def get_edge_quad_embs_old(e_emb, x_tour, x_tour_directed):
+    """
+    this method is fairly tedious so excuse the verbosity and repetition
+
+    for every edge pair (u, v), (x, y) in x_tour, identify the 2opt neighbor edges
+    (u, x), (v, y), and concatenate the edge embeddings emb(u, v), emb(x, y), emb(u, x),
+    emb(v, y) to give the embedding for the 2opt action
+
+    :param e_emb: b x v x v x h - edge embeddings
+    :param x_tour: b x v x v - binary tour adjacency mat
+    :param x_tour_directed: b x v x v - binary directed tour adjacency mat
+    :return:
+    action_quad - quadruplet embeddings of each 2opt action, [emb(u, v), emb(x, y), emb(u, x), emb(v, y)] - (b, n_edge_pairs, 4 * emb_size)
+    tour_indices_cat - the edges of the 2opt action (u, v), (x, y) - (b, n_edge_pairs, 6)
+    """
+    b, v, _, _ = e_emb.shape
+    tour_indices = torch.nonzero(x_tour)
+    tour_indices = tour_indices[tour_indices[:, 1] < tour_indices[:, 2]]
+    tour_indices = tour_indices.reshape(b, v, -1)  # b x v x 3 - last dim is (b, u, v)
+    tour_indices_cat = torch.cat([
+        tour_indices.unsqueeze(2).repeat(1, 1, v, 1),
+        tour_indices.unsqueeze(1).repeat(1, v, 1, 1)
+    ], dim=3) # b x v x v x 3
+    # indices of a v x v matrix where j > i
+    rs, cs = torch.triu_indices(v, v, offset=1)
+    tour_indices_cat = tour_indices_cat[:, rs, cs, :]  # b x v x 6 - last dim is (b, u, v, b, x, y)
+
+    x_tour_directed = x_tour_directed.bool()
+    b, n_edge_pairs, _ = tour_indices_cat.shape
+    bs = tour_indices_cat[:, :, 0].reshape(-1)
+    us = tour_indices_cat[:, :, 1].reshape(-1)
+    vs = tour_indices_cat[:, :, 2].reshape(-1)
+    xs = tour_indices_cat[:, :, 4].reshape(-1)
+    ys = tour_indices_cat[:, :, 5].reshape(-1)
+    # normalize the edges so they always point forward in the tour, this way there is a unique (u, v) and (x, y)
+    us, vs = normalize_edges_tour(x_tour_directed, bs, us, vs)
+    xs, ys = normalize_edges_tour(x_tour_directed, bs, xs, ys)
+    # put the normalized values back into the tour indices
+    tour_indices_cat[:, :, 1] = us
+    tour_indices_cat[:, :, 2] = vs
+    tour_indices_cat[:, :, 4] = xs
+    tour_indices_cat[:, :, 5] = ys
+
+    # get embeddings
+    orig_pair_emb = torch.cat([e_emb[bs, us, vs, :], e_emb[bs, xs, ys, :]], dim=1)
+    new_pair_emb = torch.cat([e_emb[bs, us, xs, :], e_emb[bs, vs, ys, :]], dim=1)
+    # compile [emb(u, v), emb(x, y), emb(u, x), emb(v, y)]
+    action_quad = torch.cat((orig_pair_emb, new_pair_emb), dim=1).reshape((b, n_edge_pairs, -1))
+
+    return action_quad, tour_indices_cat
+
+
 def test_get_edge_quad_embs():
     for _ in range(10):
         N = np.random.randint(4, 200)
+        N = 5
         nodes, rand_tour, edge_weights = _make_random_state(N)
         state = TSP2OptState(nodes, edge_weights, rand_tour, opt_tour_len=0)
         x_edges, x_edges_values, x_nodes_coord, x_tour = model_input_from_states([state])
@@ -110,6 +163,39 @@ def test_get_edge_quad_embs():
         # if we treated the edge values as a 1-d edge embedding, and got the embedding of edge quads corresponding to
         # each 2opt move
         edge_quad_embs, tour_indices_cat = get_edge_quad_embs(x_edges_values.unsqueeze(3), x_tour, x_tour_directed)
+        edge_quad_embs_old, tour_indices_cat_old = get_edge_quad_embs_old(x_edges_values.unsqueeze(3), x_tour, x_tour_directed)
+
+        neighborhood_old = []
+        for tour_index_old, edge_quad_old in zip(tour_indices_cat_old[0].numpy(), edge_quad_embs_old[0].numpy()):
+            e0 = tuple(tour_index_old[1:3])
+            e1 = tuple(tour_index_old[4:])
+            if e0[0] > e1[0]:
+                (e1, e0) = (e0, e1)
+            neighborhood_old.append({
+                'edges': tuple(list(e0) + list(e1)),
+                'emb': edge_quad_old
+            })
+
+        neighborhood_new = []
+        for tour_index, edge_quad in zip(tour_indices_cat[0].numpy(), edge_quad_embs[0].numpy()):
+            e0 = tuple(tour_index[1:3])
+            e1 = tuple(tour_index[4:])
+            if e0[0] > e1[0]:
+                (e1, e0) = (e0, e1)
+            neighborhood_new.append({
+                'edges': tuple(list(e0) + list(e1)),
+                'emb': edge_quad
+            })
+
+        print(sorted(neighborhood_old, key=lambda x: x['edges']))
+        print(sorted(neighborhood_new, key=lambda x: x['edges']))
+
+        # print(torch.sort(tour_indices_cat[0], dim=0))
+        # print(torch.sort(tour_indices_cat_old[0], dim=0))
+
+        # assert torch.allclose(edge_quad_embs, edge_quad_embs_old)
+        # assert torch.allclose(tour_indices_cat, tour_indices_cat_old)
+
         # and we use a naive calculation of the delta of each move
         deltas_stupid = compute_deltas_naive(
             tour_indices_cat=tour_indices_cat,

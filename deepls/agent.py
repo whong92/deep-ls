@@ -1,6 +1,7 @@
 from abc import ABCMeta, abstractmethod
 import copy
 import numpy as np
+import pandas as pd
 import torch
 from collections import OrderedDict
 from typing import Optional, Any, List, Tuple
@@ -9,6 +10,7 @@ from deepls.tsp_gcn_model import model_input_from_states, get_edge_quad_embs, TS
     TSPRGCNActionNet
 from deepls.graph_utils import tour_nodes_to_W
 from deepls.TSP2OptEnv import TSP2OptState
+from deepls.VRPState import VRPState
 from torch.optim import Adam
 
 
@@ -95,9 +97,8 @@ class LRPCache:
             return self.cache.popitem(last=False)
         return None
 
-
 class ExperienceBuffer:
-    def __init__(self, size):
+    def __init__(self, size, copy: bool = True):
         """
         Experience buffer for episodic MDP's
         Args:
@@ -108,6 +109,7 @@ class ExperienceBuffer:
         self.max_size = size
         self.num_steps = [0]
         self.size = 0  # total number of steps
+        self.copy = copy
 
     def append(self, episode, state, action, reward, terminal, next_state, timestep, cache):
         """
@@ -125,16 +127,26 @@ class ExperienceBuffer:
             popped_item = self.buffer.put(episode, [])
             if popped_item is not None:
                 self.size -= len(popped_item[1])
-
-        self.buffer.get(episode).append({
-            'state': copy.deepcopy(state),
-            'action': copy.deepcopy(action),
-            'reward': copy.deepcopy(reward),
-            'terminal': copy.deepcopy(terminal),
-            'next_state': copy.deepcopy(next_state),
-            'ts': copy.deepcopy(timestep),
-            'cache': copy.deepcopy(cache)
-        })
+        if self.copy:
+            self.buffer.get(episode).append({
+                'state': copy.deepcopy(state),
+                'action': copy.deepcopy(action),
+                'reward': copy.deepcopy(reward),
+                'terminal': copy.deepcopy(terminal),
+                'next_state': copy.deepcopy(next_state),
+                'ts': copy.deepcopy(timestep),
+                'cache': copy.deepcopy(cache)
+            })
+        else:
+            self.buffer.get(episode).append({
+                'state': state,
+                'action': action,
+                'reward': reward,
+                'terminal': terminal,
+                'next_state': next_state,
+                'ts': timestep,
+                'cache': cache,
+            })
         self.size += 1
 
     def flush(self):
@@ -167,7 +179,6 @@ class ExperienceBuffer:
 
 class REINFORCEAgent(BaseAgent):
     __metaclass__ = ABCMeta
-
     def init_replay_buffer(self, replay_buffer_size):
         # initialize replay buffer
         self.replay_buffer = ExperienceBuffer(replay_buffer_size)
@@ -191,8 +202,9 @@ class REINFORCEAgent(BaseAgent):
         self._agent_init(agent_config)
         self.init_replay_buffer(agent_config['replay_buffer_size'])
         self.batch_size = agent_config['batch_sz']
+        self.gamma = agent_config.get('gamma', 1.0)
 
-    def agent_start(self, state):
+    def agent_start(self, state, env=None):
         """The first method called when the experiment starts, called after
         the environment starts.
         Args:
@@ -203,11 +215,11 @@ class REINFORCEAgent(BaseAgent):
         self.episode_steps = 0
         self.episode += 1
         self.last_state = copy.deepcopy(state)
-        self.last_action, self.last_cache = self.policy(self.last_state)
+        self.last_action, self.last_cache = self.policy(self.last_state, env)
         return self.last_action
 
     @abstractmethod
-    def policy(self, state):
+    def policy(self, state, env=None):
         """
         run this with provided state to get action
         """
@@ -221,7 +233,7 @@ class REINFORCEAgent(BaseAgent):
         raise NotImplementedError
 
     # weights update using optimize_network, and updating last_state and last_action (~5 lines).
-    def agent_step(self, reward, state):
+    def agent_step(self, reward, state, env=None):
         """A step taken by the agent.
         Args:
             reward (Sequence[float]): the rewards received for taking the last action taken
@@ -246,7 +258,7 @@ class REINFORCEAgent(BaseAgent):
                 self.last_cache
             )
         # Select action
-        action, cache = self.policy(state)
+        action, cache = self.policy(state, env=env)
 
         # Update the last state and last action.
         self.last_state = copy.deepcopy(state)
@@ -285,17 +297,27 @@ class REINFORCEAgent(BaseAgent):
 
             # compute returns - no discounting for now
             experience = self.replay_buffer.get_episode(self.episode)
-            returns = torch.flip(
-                torch.cumsum(
-                    torch.as_tensor([step['reward'] for step in experience][::-1]),
-                    dim=0
-                ),
-                dims=[0]
-            )  # num_steps x batch_size
-            for ret, step in zip(returns, experience):
-                step['cache']['return'] = ret
-                step['cache']['average_return'] = torch.mean(ret) * torch.ones_like(ret)
+            # building the discount matrix
+            # B x n_steps
+            reward = torch.as_tensor([step['reward'] for step in experience]).T
 
+            n_steps = reward.shape[1]
+            gamma = self.gamma
+            d_r0 = torch.pow(gamma, torch.arange(0, n_steps))
+            d_mat = torch.zeros(size=(n_steps, n_steps))
+
+            for r in range(n_steps):
+                d_mat[r, r:] = d_r0[:n_steps - r]
+            # B x n_steps x n_steps (to sum over)
+            rewards_mat = reward[:, None, :] * d_mat[None, :, :]
+            returns = torch.sum(rewards_mat, dim=2).T  # n_steps x B
+
+            for ret, step in zip(returns, experience):
+                state_ids = np.array([state[0].id for state in step['state']])
+                df = pd.DataFrame({'state_ids': state_ids, 'returns': ret.numpy()})
+                avg_ret = np.array(df.groupby('state_ids', as_index=False).returns.transform(np.mean).returns)
+                step['cache']['return'] = ret
+                step['cache']['average_return'] = torch.as_tensor(avg_ret)
             # Perform replay steps:
             experiences_dict = self.replay_buffer.sample_experience(self.replay_buffer.get_size())
             self.agent_optimize(experiences_dict)
@@ -484,10 +506,12 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
         if init_config:
             self.agent_init(agent_config)
         self.net.load_state_dict(bla['net'], strict=False)
-        self.critic_baseline.load_state_dict(bla['critic'], strict=False)
+        if 'critic' in bla:
+            self.critic_baseline.load_state_dict(bla['critic'], strict=False)
         if load_optim:
             self.optimizer.load_state_dict(bla['optimizer'])
-            self.critic_optimizer.load_state_dict(bla['critic_optimizer'])
+            if 'critic_optimizer' in bla:
+                self.critic_optimizer.load_state_dict(bla['critic_optimizer'])
 
     def _agent_init(self, agent_config):
         self.agent_config = copy.deepcopy(agent_config)
@@ -528,6 +552,7 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
         self.critic_optimize_every = agent_config['critic_optimize_every']
         self.minibatch_size = agent_config['minibatch_sz']
         self.use_ppo_update = agent_config.get('use_ppo_update', False)
+        self.entropy_bonus = agent_config.get('entropy_bonus', 0.)
         self.greedy = False
 
     def compute_baseline_and_loss(self, experiences, perm, returns):
@@ -577,6 +602,7 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
 
         self.optimizer.zero_grad()
         self.critic_optimizer.zero_grad()
+        self.critic_abs_err = 0
         for (minibatch_perm, minibatch_returns), weight in \
                 iter_over_tensor_minibatch(perm, returns, minibatch_size=self.minibatch_size):
 
@@ -592,7 +618,13 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
                         minibatch_baseline, critic_loss = self.compute_baseline_and_loss(experiences, minibatch_perm, _returns)
 
             if optimize_policy:
-                h_sa, h_sa_old = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
+                action_pref_output = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
+                h_sa = action_pref_output[0]
+                h_sa_old = action_pref_output[1]
+                if len(action_pref_output) > 2:
+                    policy_entropy = action_pref_output[2]
+                else:
+                    policy_entropy = 0.
                 td_err = minibatch_returns.clone().to(self.device) - minibatch_baseline.detach()
                 if self.use_ppo_update:
                     # PPO update
@@ -603,13 +635,15 @@ class GRCNCriticBaselineAgent(REINFORCEAgent):
                 else:
                     # regular PG update
                     eligibility_loss = -h_sa  # NLL loss
-                    policy_loss = (td_err * eligibility_loss).mean() * weight
+                    # entropy bonus
+                    beta = self.entropy_bonus
+                    policy_loss = (td_err * eligibility_loss - beta * policy_entropy).mean() * weight
                 policy_loss.backward()
 
             self.critic_loss_val = critic_loss.detach().to('cpu')
-            self.critic_abs_err = torch.abs(
+            self.critic_abs_err += torch.abs(
                 minibatch_baseline.detach().to('cpu') - minibatch_returns
-            ).mean()
+            ).mean() * weight
 
         self.critic_optimizer.step()
         self.optimizer.step()
@@ -666,6 +700,7 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
         self.policy_optimize_every = agent_config['policy_optimize_every']
         self.minibatch_size = agent_config['minibatch_sz']
         self.use_ppo_update = agent_config.get('use_ppo_update', False)
+        self.entropy_bonus = agent_config.get('entropy_bonus', 0.)
         self.greedy = False
 
     def compute_baseline(self, experiences, perm):
@@ -676,11 +711,11 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
         self.greedy = greedy
         self.net.set_greedy(greedy)
 
-    def policy(self, states):
+    def policy(self, states, env=None):
         """
         run this with provided state to get action
         """
-        return self.action_net_runner.policy(states)
+        return self.action_net_runner.policy(states, env)
 
     def agent_optimize(self, experiences):
         """
@@ -702,9 +737,15 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
             self.optimizer.zero_grad()
             for (minibatch_perm, minibatch_returns, minibatch_baseline), weight in \
                     iter_over_tensor_minibatch(perm, returns, baseline, minibatch_size=self.minibatch_size):
-                h_sa, h_sa_old = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
+                action_pref_output = self.action_net_runner.get_action_pref(experiences, minibatch_perm)
                 td_err = (minibatch_returns.clone() - minibatch_baseline.detach()).to(self.device)
 
+                h_sa = action_pref_output[0]
+                h_sa_old = action_pref_output[1]
+                if len(action_pref_output) > 2:
+                    policy_entropy = action_pref_output[2]
+                else:
+                    policy_entropy = 0.
                 if self.use_ppo_update:
                     # PPO update
                     ratio = torch.exp(h_sa - h_sa_old)
@@ -714,8 +755,10 @@ class AverageStateRewardBaselineAgent(REINFORCEAgent):
                 else:
                     # regular PG update
                     eligibility_loss = -h_sa  # NLL loss
-                    policy_loss = (td_err * eligibility_loss).mean() * weight  # TODO: discounting!(?)
-
+                    # entropy bonus
+                    beta = self.entropy_bonus
+                    # TODO: discounting!(?)
+                    policy_loss = (td_err * eligibility_loss - beta * policy_entropy).mean() * weight
                 policy_loss.backward()
             self.optimizer.step()
 
