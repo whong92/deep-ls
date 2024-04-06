@@ -37,7 +37,7 @@ def load_dataset(filename):
         return pickle.load(f)
 
 if __name__=="__main__":
-    size = 50
+    size = 100
     N = 10000
     vrp_data = generate_vrp_data(N, size)
     save_dataset(vrp_data, f"/home/ong/personal/deep-ls-tsp/data/vrp-data/size-{size}/vrp_data.pkl")

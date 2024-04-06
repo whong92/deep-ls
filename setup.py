@@ -1,6 +1,8 @@
 from setuptools import setup, Extension
 import numpy as np
 
+module = Extension('vrpstate', sources=['deepls/vrpstate.cpp'], include_dirs=[np.get_include()])
+
 
 setup(
     name='deep-ls-tsp',
@@ -10,5 +12,6 @@ setup(
     license='',
     author='Wai Hong Ong',
     author_email='samuelong168@gmail.com',
-    description=''
+    description='',
+    ext_modules=[module]
 )

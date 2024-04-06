@@ -7,7 +7,6 @@ from torch.distributions import categorical as tdc
 
 from deepls.gcn_layers import MLP
 from deepls.gcn_model import ResidualGatedGCNModel
-# from deepls.gcn_model_pyg import ResidualGatedGCNModelPyG
 
 
 def model_input_from_states(states):
@@ -141,7 +140,6 @@ class TSPRGCNValueNet(nn.Module):
         super().__init__()
         config = copy.deepcopy(config)
         config['num_edge_cat_features'] = 2
-        # self.rgcn = ResidualGatedGCNModelPyG(config)
         self.rgcn = ResidualGatedGCNModel(config)
         self.hidden_dim = config['hidden_dim']
         self.value_net = torch.nn.Sequential(
@@ -167,7 +165,6 @@ class TSPRGCNLogNormalValueNet(nn.Module):
         super().__init__()
         config = copy.deepcopy(config)
         config['num_edge_cat_features'] = 2
-        # self.rgcn = ResidualGatedGCNModelPyG(config)
         self.rgcn = ResidualGatedGCNModel(config)
         self.hidden_dim = config['hidden_dim']
         self.value_net = torch.nn.Sequential(

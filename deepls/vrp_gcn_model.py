@@ -50,7 +50,6 @@ class VRPValueNet(nn.Module):
         value = torch.mean(x_emb, dim=1)
         return value
 
-
 class VRPActionNet(nn.Module):
     def __init__(self, config, device):
         super().__init__()
@@ -139,38 +138,26 @@ class VRPActionNet(nn.Module):
 
     @staticmethod
     def sample_moves_given_logits(
-        move_logits: torch.Tensor,  # B x num_moves
+        move_logits: torch.Tensor,
         moves: List[List[Dict[str, Any]]],
         tau: float = 1.0,
         greedy: bool = False,
         actions: Optional[torch.Tensor] = None,  # B x k
-        device='cpu',
-        K: int = 1
+        device='cpu'
     ):
         if actions is None and not greedy:
             tour_dist_sample = tdc.Categorical(logits=move_logits / tau)
-            top_k_actions = torch.multinomial(
-                tour_dist_sample.probs,
-                num_samples=K,
-                replacement=False
-            )  # B x k
-            # actions = tour_dist_sample.sample()
+            actions = tour_dist_sample.sample()
         elif actions is None and greedy:
-            raise ValueError()
             actions = torch.argmax(move_logits / tau, dim=1)  # b
-        else:
-            top_k_actions = actions
 
         tour_dist = tdc.Categorical(logits=move_logits)
-        pi = torch.stack([tour_dist.log_prob(top_k_actions[:, k].to(device)) for k in range(K)], dim=1)  # b x k
-        ent = torch.stack([tour_dist.entropy() for k in range(K)], dim=1) # tour_dist.entropy()  # b x k
+        pi = tour_dist.log_prob(actions.to(device))  # b
+        ent = tour_dist.entropy()
         # convert action indices into the action actions_0
         # these can be replaced by chosen moves
-        moves_sampled = []
-        for actions, nbh in zip(top_k_actions, moves):
-            _moves_sampled = [nbh[action_idx] for action_idx in actions]
-            moves_sampled.append(_moves_sampled)
-        return top_k_actions, moves_sampled, pi, ent
+        moves = [nbh[action_idx] for action_idx, nbh in zip(actions, moves)]
+        return actions, moves, pi, ent
 
     @staticmethod
     def vectorize_moves(reloc_nbh=None, cross_nbh=None, twp_opt_nbh=None):
@@ -229,9 +216,7 @@ class VRPActionNet(nn.Module):
         reloc_nbh_vects,
         cross_nbh_vects,
         two_opt_nbh_vects,
-        second_move_list,
-        first_move_list_logits_padded,
-        first_move_list_entropy_padded,
+        second_move_list
     ):
         # TODO: condition second move on first move's embedding! (but with gradients truncated)!
         all_moves_embedded = self.embed_vectorized_moves(
@@ -245,14 +230,8 @@ class VRPActionNet(nn.Module):
         all_moves_logits_padded = pad_sequence(
             all_moves_logits, batch_first=True, padding_value=-float("inf")
         ).squeeze(-1)
-        pi_0_padded = pad_sequence(
-            first_move_list_logits_padded, batch_first=True, padding_value=-float("inf")
-        ).squeeze(-1)
-        ent_0_padded = pad_sequence(
-            first_move_list_entropy_padded, batch_first=True, padding_value=-float("inf")
-        ).squeeze(-1)
 
-        return all_moves_logits_padded, second_move_list, pi_0_padded, ent_0_padded
+        return all_moves_logits_padded, second_move_list
 
     def _get_first_moves_from_nbhs(self, nbhs: List[VRPNbHAutoReg]):
         edges_vect_all = []
@@ -276,7 +255,6 @@ class VRPActionNet(nn.Module):
             cross_nbh_vects.append(nbh.cross_nbh_vect)
             two_opt_nbh_vects.append(nbh.twp_opt_nbh_vect)
             second_move_list.append(nbh.second_moves)
-            selected_first_actions_k.append(nbh.selected_first_actions_k)
         return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list, selected_first_actions_k
 
     # @staticmethod
@@ -330,24 +308,21 @@ class VRPActionNet(nn.Module):
     def _make_second_moves_multiproc_env(
         self,
         moves_0: List,
-        actions_0: np.ndarray,
         nbhs: List[VRPNbHAutoReg],
-        envs: VRPMultiEnvAbstract
+        states: List[VRPState]
     ):
         reloc_nbh_vects = []
         cross_nbh_vects = []
         two_opt_nbh_vects = []
         second_move_list = []
-        selected_first_actions_k = []
-        results = envs.get_second_moves(moves_0, actions_0)
+        results = [nbh._get_second_move_nbh(state, move_0) for state, move_0, nbh in zip(states, moves_0, nbhs)]
         for nbh, result in zip(nbhs, results):
-            nbh.reloc_nbh_vect, nbh.cross_nbh_vect, nbh.twp_opt_nbh_vect, nbh.second_moves, nbh.selected_first_actions_k = result
+            nbh.reloc_nbh_vect, nbh.cross_nbh_vect, nbh.twp_opt_nbh_vect, nbh.second_moves = result
             reloc_nbh_vects.append(nbh.reloc_nbh_vect)
             cross_nbh_vects.append(nbh.cross_nbh_vect)
             two_opt_nbh_vects.append(nbh.twp_opt_nbh_vect)
             second_move_list.append(nbh.second_moves)
-            selected_first_actions_k.append(nbh.selected_first_actions_k)
-        return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list, selected_first_actions_k
+        return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list
 
     def forward_autoreg(
         self,
@@ -361,8 +336,9 @@ class VRPActionNet(nn.Module):
     ):
         x_cat = torch.stack([x_tour, x_best_tour], dim=3)
         x_emb, e_emb = self.rgcn(x_cat, x_edges_values, x_nodes_coord)
+        # x_emb = self.rgcn(x_nodes_coord)
 
-        nbhs = [state.get_nbh() for state in states]
+        nbhs = [VRPNbHAutoReg.init_from_state(state) for state in states]
 
         edges_vect_all, nodes_vect_all, first_move_nbhs = self._get_first_moves_from_nbhs(nbhs)
         first_move_logits, first_move_nbhs = self.get_first_move_logits(
@@ -370,96 +346,24 @@ class VRPActionNet(nn.Module):
             e_emb,
             edges_vect_all, nodes_vect_all, first_move_nbhs
         )
-        K = 1
-        actions_top_k_0, moves_top_k_0, pi_top_k_0, ent_top_k_0 = self.sample_moves_given_logits(
-            first_move_logits, first_move_nbhs, device=self.device, greedy=False, K=K
-        )
+        actions_0, moves_0, pi_0, _ = self.sample_moves_given_logits(first_move_logits, first_move_nbhs,
+                                                                     device=self.device, greedy=False)
 
-        B = len(states)
+        reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list = \
+            self._make_second_moves_multiproc_env(moves_0, nbhs, states)
 
-        reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list, selected_first_actions_k = \
-            self._make_second_moves_multiproc_env(moves_top_k_0, actions_top_k_0.cpu().numpy(), nbhs, envs)
-
-        pi_0 = [
-            pi_top_k_0[i, f] for i, f in enumerate(selected_first_actions_k)
-        ]
-        ent_0 = [
-            ent_top_k_0[i, f] for i, f in enumerate(selected_first_actions_k)
-        ]
-
-        second_moves_logits_padded, second_moves_list_padded, pi_0_padded, ent_0_padded = \
-            self.get_second_move_logits(
-                e_emb,
-                reloc_nbh_vects,
-                cross_nbh_vects,
-                two_opt_nbh_vects,
-                second_move_list,
-                pi_0,
-                ent_0
-            )
-
-        actions_1, moves_1, pi_1, _ = self.sample_moves_given_logits(
-            second_moves_logits_padded,
-            second_moves_list_padded,
-            device=self.device,
-            greedy=False,
-            K=1
-        )
-
-        pi_0_sampled = pi_0_padded[torch.arange(B), actions_1[:, 0]]
-
-        pi = pi_0_sampled + pi_1[:, 0]
-
-        moves = [move[0] for move in moves_1]
-        actions = torch.cat([
-            actions_top_k_0, actions_1
-        ], dim=1)
-
-
+        # assert False
+        second_moves_logits_padded, second_move_list = \
+            self.get_second_move_logits(e_emb, reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list)
+        actions_1, moves_1, pi_1, _ = self.sample_moves_given_logits(second_moves_logits_padded, second_move_list,
+                                                                     device=self.device, greedy=False)
+        # print(moves_1)
+        #
+        actions = torch.stack([actions_0, actions_1], dim=1)
+        pi = pi_0 + pi_1
+        moves = moves_1
         return moves, pi, actions, nbhs
 
-    def embed_state_and_neighborhood(
-        self,
-        x_edges,
-        x_edges_values,
-        x_nodes_coord,
-        x_tour,
-        x_best_tour,
-        states: List[VRPState],
-    ) -> List[torch.Tensor]:
-        x_cat = torch.stack([x_tour, x_best_tour], dim=3)
-        nbhs = [state.get_nbh() for state in states]
-
-        # action 0
-        x_emb, e_emb = self.rgcn(x_cat, x_edges_values, x_nodes_coord)
-
-        reloc_moves_embedded = embed_reloc_heuristic(
-            reloc_moves_vectorized=[nbh.relocate_nbhs_vectorized for nbh in nbhs],
-            edge_embeddings=e_emb,
-            reloc_move_mlp=self.reloc_mlp
-        )
-        cross_moves_embedded = embed_cross_heuristic(
-            cross_moves_vectorized=[nbh.cross_nbhs_vectorized for nbh in nbhs],
-            edge_embeddings=e_emb,
-            cross_move_mlp=self.cross_mlp
-        )
-        two_opt_moves_embedded = embed_cross_heuristic(
-            cross_moves_vectorized=[nbh.two_opt_nbhs_vectorized for nbh in nbhs],
-            edge_embeddings=e_emb,
-            cross_move_mlp=self.cross_mlp
-        )
-
-        all_moves_embedded = [
-            torch.cat([r, c, t], dim=0)
-            for r, c, t in
-            zip(
-                reloc_moves_embedded,
-                cross_moves_embedded,
-                two_opt_moves_embedded
-            )
-        ]
-
-        return all_moves_embedded
 
     def forward(
         self,
@@ -480,7 +384,6 @@ class VRPActionNet(nn.Module):
         x_nodes_coord,
         x_tour,
         x_best_tour,
-        states: List[VRPState],
         actions: torch.Tensor,
         nbhs: List[VRPNbHAutoReg]
     ):
@@ -489,62 +392,28 @@ class VRPActionNet(nn.Module):
         x_cat = torch.stack([x_tour, x_best_tour], dim=3)
         x_emb, e_emb = self.rgcn(x_cat, x_edges_values, x_nodes_coord)
 
-        nbhs = [state.get_nbh() for state in states]
-
         edges_vect_all, nodes_vect_all, first_move_nbhs = self._get_first_moves_from_nbhs(nbhs)
         first_move_logits, first_move_nbhs = self.get_first_move_logits(
             x_emb,
             e_emb,
             edges_vect_all, nodes_vect_all, first_move_nbhs
         )
-        K = 1
-        actions_top_k_0, moves_top_k_0, pi_top_k_0, ent_top_k_0 = self.sample_moves_given_logits(
-            first_move_logits, first_move_nbhs, device=self.device, greedy=False, K=K, actions=actions[:, :K]
-        )
 
-        B = len(states)
+        actions_0, moves_0, pi_0, ent_0 = self.sample_moves_given_logits(first_move_logits, first_move_nbhs, actions=actions[:, 0], device=self.device)
 
         reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list, selected_first_actions_k = (
             self._get_second_moves_from_nbhs(nbhs)
         )
 
-        pi_0 = [
-            pi_top_k_0[i, f] for i, f in enumerate(selected_first_actions_k)
-        ]
-        ent_0 = [
-            ent_top_k_0[i, f] for i, f in enumerate(selected_first_actions_k)
-        ]
-
-        second_moves_logits_padded, second_moves_list_padded, pi_0_padded, ent_0_padded = \
-            self.get_second_move_logits(
-                e_emb,
-                reloc_nbh_vects,
-                cross_nbh_vects,
-                two_opt_nbh_vects,
-                second_move_list,
-                pi_0,
-                ent_0
-            )
-
-        actions_1, moves_1, pi_1, ent_1 = self.sample_moves_given_logits(
-            second_moves_logits_padded,
-            second_moves_list_padded,
-            device=self.device,
-            greedy=False,
-            K=1,
-            actions=actions[:, -1:]
+        second_moves_logits_padded, second_move_list = self.get_second_move_logits(
+            e_emb, reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list
         )
 
-        pi_0_sampled = pi_0_padded[torch.arange(B), actions_1[:, 0]]
-        ent_0_sampled = ent_0_padded[torch.arange(B), actions_1[:, 0]]
-
-        pi = pi_0_sampled + pi_1[:, 0]
-        ent = ent_0_sampled + ent_1[:, 0]
-
-        moves = [move[0] for move in moves_1]
-        actions = torch.cat([
-            actions_top_k_0, actions_1
-        ], dim=1)
+        actions_1, moves_1, pi_1, ent_1 = self.sample_moves_given_logits(second_moves_logits_padded, second_move_list,
+                                                                         actions=actions[:, 1], device=self.device)
+        pi = pi_0 + pi_1
+        ent = ent_0 + ent_1
+        moves = list(zip(moves_0, moves_1))
 
         return moves, pi, actions, ent
 
@@ -555,7 +424,7 @@ class VRPActionNet(nn.Module):
         x_nodes_coord,
         x_tour,
         x_best_tour,
-        states: List[VRPState],
+        # states: List[VRPState],
         actions: torch.Tensor,
         nbhs: List[VRPNbHAutoReg]
     ):
@@ -565,7 +434,7 @@ class VRPActionNet(nn.Module):
             x_nodes_coord,
             x_tour,
             x_best_tour,
-            states,
+            # states,
             actions,
             nbhs
         )
@@ -635,12 +504,13 @@ class ActionNetRunner:
         with torch.no_grad():
             moves, pis, action_idxs, nbhs = self.net(*[t.clone().to(self.device) for t in model_input] + [states_input], env)
         cache = {
-            'model_input': model_input + [states_input],
+            'model_input': model_input,
             'action': action_idxs.detach().to('cpu'),
             'action_pref': pis.detach().to('cpu'),
             'tour_len': [state.get_cost() for state in states],
             'moves': moves,
-            'nbhs': nbhs
+            'state_ids': [state.id for state in states],
+            'nbhs': nbhs  # maybe construct the nbh in agent so agent owns it?
         }
         actions = [{'move': move, 'terminate': False} for move in moves]
         return actions, cache
@@ -659,11 +529,11 @@ class ActionNetRunner:
         x_nodes_coord = torch.cat([c[2] for c in cached_inputs], dim=0)[perm]
         x_tour = torch.cat([c[3] for c in cached_inputs], dim=0)[perm]
         x_best_tour = torch.cat([c[4] for c in cached_inputs], dim=0)[perm]
-        states_input = []
+        # states_input = []
 
-        for c in cached_inputs:
-            states_input.extend(c[5])
-        states_input = [states_input[p] for p in perm]
+        # for c in cached_inputs:
+        #     states_input.extend(c[5])
+        # states_input = [states_input[p] for p in perm]
 
         nbhs = []
         for e in experiences:
@@ -677,7 +547,7 @@ class ActionNetRunner:
 
         _, h_sa, _, ent = self.net.get_action_pref(
             *[t.clone().to(self.device) for t in model_inputs] +
-             [states_input] +
+             # [states_input] +
              [actions.clone()],
             nbhs=nbhs
         )
@@ -709,7 +579,6 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
         self.batch_size = agent_config['batch_sz']
         self.gamma = agent_config.get('gamma', 1.0)
 
-        self.states = []
         self.actions = []
         self.caches = []
         self.rewards = []
@@ -726,13 +595,13 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
         self.episode_steps = 0
         self.episode += 1
 
-        self.states = []
+        self.state_ids = []
         self.actions = []
         self.caches = []
         self.rewards = []
 
         self.last_state = state
-        self.states.append(self.last_state)
+        self.state_ids.append([s[0].id for s in self.last_state])
         self.last_action, self.last_cache = self.policy(self.last_state, env)
         self.actions.append(self.last_action)
         self.caches.append(self.last_cache)
@@ -760,7 +629,7 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
         self.last_action = action
         self.last_cache = cache
 
-        self.states.append(self.last_state)
+        self.state_ids.append([s[0].id for s in self.last_state])
         self.actions.append(self.last_action)
         self.caches.append(self.last_cache)
 
@@ -781,12 +650,12 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
         self.episode_steps += 1
 
         if self.train:
-            for s, (_state, _next_state, _action, _reward, _cache) in enumerate(
-                zip(self.states[:-1], self.states[1:], self.actions, self.rewards, self.caches), start=1
+            for s, (_state_id, _next_state, _action, _reward, _cache) in enumerate(
+                zip(self.state_ids[:-1], self.state_ids[1:], self.actions, self.rewards, self.caches), start=1
             ):
                 self.replay_buffer.append(
                     self.episode,
-                    _state,
+                    _state_id,
                     _action,
                     _reward,
                     False,
@@ -797,7 +666,7 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
             # Append new experience to replay buffer
             self.replay_buffer.append(
                 self.episode,
-                self.last_state,
+                [s[0].id for s in self.last_state],
                 self.last_action,
                 reward,
                 True,
@@ -824,7 +693,7 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
             returns = torch.sum(rewards_mat, dim=2).T  # n_steps x B
 
             for ret, step in zip(returns, experience):
-                state_ids = np.array([state[0].id for state in step['state']])
+                state_ids = np.array(step['state'])
                 df = pd.DataFrame({'state_ids': state_ids, 'returns': ret.numpy()})
                 avg_ret = np.array(df.groupby('state_ids', as_index=False).returns.transform(np.mean).returns)
                 step['cache']['return'] = ret

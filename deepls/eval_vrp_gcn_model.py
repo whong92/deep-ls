@@ -1,5 +1,5 @@
 from deepls.vrp_gcn_model import AverageStateRewardBaselineAgentVRP, VRP_STANDARD_PROBLEM_CONF
-from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPState, VRPEnvBase, VRPReward, VRPInitTour
+from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPState, VRPEnvBase, VRPReward, VRPInitTour, VRPMultiFileEnvSingleProc
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
@@ -44,18 +44,19 @@ if __name__=="__main__":
 
     agent = AverageStateRewardBaselineAgentVRP()
     agent.agent_init(agent_config)
-    agent.load(f'{workdir}/model/vrp-50-nodes-chunked-episodes-cost-emb-delta-cost-longer-eps/model-03000-val-0.094.ckpt', init_config=False)
+    agent.load(f'{workdir}/model/vrp-50-nodes-lr-2e-6-beta-2e-3-longer-delta-cost-singleton-init-from-scratch/model-03000-val-0.071.ckpt', init_config=False)
     agent.set_eval()
+    # agent.set_train()
 
-    envs = VRPMultiFileEnv(
+    envs = VRPMultiFileEnvSingleProc(
         data_f=f'{workdir}/data/vrp-data/size-50/vrp_data_with_results.pkl',
         num_nodes=N,
         max_num_steps=num_steps,
         max_tour_demand=max_tour_demand,
-        num_samples_per_instance=5,
+        num_samples_per_instance=12,
         num_instance_per_batch=1,
         reward_mode=VRPReward.DELTA_COST,
-        initializer=VRPInitTour.MAX_CAP_RANDOM
+        initializer=VRPInitTour.SINGLETON
     )
     pbar = tqdm(range(episodes))
     opt_gaps = 0.
@@ -75,7 +76,7 @@ if __name__=="__main__":
             plot_state(states[0][0], f'{workdir}/dump/episode_{episode:03d}_step_{step:03d}.jpg')
             done = dones[0]
             if done:
-                agent.agent_end(rewards)
+                policy_loss = agent.agent_end(rewards)
                 break
             else:
                 actions = agent.agent_step(

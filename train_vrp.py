@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPReward, VRPInitTour
+from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPReward, VRPInitTour, VRPMultiFileEnvSingleProc
 from deepls.vrp_gcn_model import (
     AverageStateRewardBaselineAgentVRP, VRP_STANDARD_PROBLEM_CONF, CriticBaselineAgentVRP
 )
@@ -151,6 +151,7 @@ def run_experiment(
 
     agent_config = experiment_config['agent_config']
 
+    # env = VRPMultiFileEnvSingleProc(
     env = VRPMultiFileEnv(
         data_f=train_data_f,
         num_nodes=problem_sz,
@@ -316,7 +317,7 @@ if __name__ == "__main__":
         'initializer': VRPInitTour.SINGLETON,
         'val_every': 500,
         'start_run': 0,
-        'train_runs': 1000,
+        'train_runs': 2000,
         'agent_config': agent_config,
         'model_root': args.modelroot,
         'data_root': args.dataroot

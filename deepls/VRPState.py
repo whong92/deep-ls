@@ -1,7 +1,8 @@
 import numpy as np
 from typing import List, Optional, Dict, Tuple, Any, Union
 import random
-
+import vrpstate
+import pickle
 
 from datetime import datetime
 import torch
@@ -450,7 +451,7 @@ class VRPState:
                         'node_pos': tour_nodes_to_node_rep(tour),
                         'cum_dems': tour_nodes_to_cum_demands(tour, self.node_demands)
                     }
-        self.nbh = self.make_nbh()
+        # self.nbh = self.make_nbh()
 
     def all_tours_as_list(self, remove_last_depot=False, remove_first_depot=False):
         all_tours_list = [t['tour'] for t in self.tours.values()]
@@ -539,7 +540,7 @@ class VRPState:
             )
         else:
             raise ValueError("Invalid move type")
-        self.nbh = self.make_nbh()
+        # self.nbh = self.make_nbh()
 
     def _apply_cross_move(
         self,
@@ -639,7 +640,7 @@ class VRPState:
         }
 
     def make_nbh(self):
-        return VRPNbHAutoReg(self)
+        return VRPNbHAutoReg.init_from_state(self)
 
     def get_nbh(self):
         return self.nbh
@@ -979,7 +980,22 @@ def flatten_deduplicate_2opt_nbh(
     return two_opt_nbh_dict
 
 
+from dataclasses import dataclass
+
+
+@dataclass
 class VRPNbHAutoReg:
+    tour_edges: Dict[int, np.ndarray]
+    tour_nodes: Dict[int, np.ndarray]
+    edges_vect: Optional[np.ndarray] = None
+    nodes_vect: Optional[np.ndarray] = None
+    first_move_nbh: Optional[np.ndarray] = None
+    reloc_nbh_vect: Optional[np.ndarray] = None
+    cross_nbh_vect: Optional[np.ndarray] = None
+    twp_opt_nbh_vect: Optional[np.ndarray] = None
+    selected_first_actions_k: Optional[np.ndarray] = None
+    second_moves = None
+
     @staticmethod
     def vectorize_moves(reloc_nbh=None, cross_nbh=None, twp_opt_nbh=None):
         if reloc_nbh is None:
@@ -999,6 +1015,7 @@ class VRPNbHAutoReg:
         first_move_nbh = []
         edges_vect = []
         nodes_vect = []
+        tour_idxs = []
         for tour_idx, tour_nodes in self.tour_nodes.items():
             _tour_nodes = tour_nodes[1:-1]
             nodes_vect.append(_tour_nodes)  # we don't want depot nodes here
@@ -1020,83 +1037,70 @@ class VRPNbHAutoReg:
     def _get_second_move_nbh(
         self,
         state: VRPState,
-        moves_0,
-        actions_top_k_0: np.ndarray  # k
+        move_0
     ):
-        reloc_nbhs = []
-        cross_nbhs = []
-        twoopt_nbhs = []
         second_moves = []
-        selected_first_actions_k = []
-        for i, (action_0, move_0) in enumerate(zip(actions_top_k_0, moves_0)):
-            _second_moves = []
-            if move_0['type'] == 'node':
-                node = move_0['node']
-                node_tour = move_0['tour_idx']
-                node_pos = self.tours[node_tour]['node_pos'][node]
-                _reloc_nbh = enumerate_relocate_neighborhood_given(
-                    node, node_tour, node_pos, self.tour_edges
-                )
-                _reloc_nbh = flatten_deduplicate_reloc_nbh(_reloc_nbh, state=state)
-                # _reloc_nbh = vrpstate.flatten_reloc_nbh(
-                #     _reloc_nbh,
-                #     state.tours,
-                #     state.node_demands,
-                #     state.edge_weights,
-                #     state.max_tour_demand
-                # )
-                _reloc_nbh = list(_reloc_nbh.values())
-                reloc_nbhs.extend(_reloc_nbh)
-                _second_moves.extend(_reloc_nbh)
-                # reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves(_reloc_nbh, [], [])
-            elif move_0['type'] == 'edge':
-                edge = move_0['edge']
-                edge_tour = move_0['tour_idx']
-                _cross_nbh = enumerate_cross_neighborhood_given(edge_tour, edge, self.tour_edges)
-                _two_opt_nbh = enumerate_2_opt_neighborhood_given(edge_tour, edge, self.tour_edges)
-                _cross_nbh = flatten_deduplicate_cross_nbh(cross_nbhs=_cross_nbh, state=state)
-                _two_opt_nbh = flatten_deduplicate_2opt_nbh(_two_opt_nbh, state=state)
-                # _cross_nbh = vrpstate.flatten_cross_nbh(
-                #     _cross_nbh,
-                #     state.tours,
-                #     state.node_demands,
-                #     state.edge_weights,
-                #     state.max_tour_demand
-                # )
-                # _two_opt_nbh = vrpstate.flatten_2opt_nbh(
-                #     _two_opt_nbh,
-                #     state.tours,
-                #     state.edge_weights,
-                # )
-
-                _cross_nbh = list(_cross_nbh.values())
-                _two_opt_nbh = list(_two_opt_nbh.values())
-                cross_nbhs.extend(_cross_nbh)
-                twoopt_nbhs.extend(_two_opt_nbh)
-                _second_moves.extend(_cross_nbh + _two_opt_nbh)
-            selected_first_actions_k.append(
-                np.full(shape=(len(_second_moves)), fill_value=i, dtype=int)
+        if move_0['type'] == 'node':
+            node = move_0['node']
+            node_tour = move_0['tour_idx']
+            node_pos = state.tours[node_tour]['node_pos'][node]
+            reloc_nbh = enumerate_relocate_neighborhood_given(
+                node, node_tour, node_pos, self.tour_edges
             )
-            second_moves.extend(_second_moves)
+            # reloc_nbh = flatten_deduplicate_reloc_nbh(reloc_nbh, state=state)
+            reloc_nbh = vrpstate.flatten_reloc_nbh(
+                reloc_nbh,
+                state.tours,
+                state.node_demands,
+                state.edge_weights,
+                state.max_tour_demand
+            )
+            reloc_nbh = list(reloc_nbh.values())
+            second_moves = reloc_nbh
 
-        selected_first_actions_k = np.concatenate(selected_first_actions_k, axis=0)
-        reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves(reloc_nbhs, cross_nbhs, twoopt_nbhs)
-        return reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect, second_moves, selected_first_actions_k
+            reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves(reloc_nbh, [], [])
+        elif move_0['type'] == 'edge':
+            edge = move_0['edge']
+            edge_tour = move_0['tour_idx']
+            cross_nbh = enumerate_cross_neighborhood_given(edge_tour, edge, self.tour_edges)
+            two_opt_nbh = enumerate_2_opt_neighborhood_given(edge_tour, edge, self.tour_edges)
+            # cross_nbh = flatten_deduplicate_cross_nbh(cross_nbhs=cross_nbh, state=state)
+            # two_opt_nbh = flatten_deduplicate_2opt_nbh(two_opt_nbh, state=state)
+            cross_nbh = vrpstate.flatten_cross_nbh(
+                cross_nbh,
+                state.tours,
+                state.node_demands,
+                state.edge_weights,
+                state.max_tour_demand
+            )
+            two_opt_nbh = vrpstate.flatten_2opt_nbh(
+                two_opt_nbh,
+                state.tours,
+                state.edge_weights,
+            )
 
-    def __init__(self, state: VRPState):
-        self.tour_edges, _ = enumerate_all_tours_edges(
+            cross_nbh = list(cross_nbh.values())
+            two_opt_nbh = list(two_opt_nbh.values())
+
+            reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves([], cross_nbh, two_opt_nbh)
+            second_moves = cross_nbh + two_opt_nbh
+
+        return reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect, second_moves
+
+    @classmethod
+    def init_from_state(cls, state: VRPState):
+        tour_edges, _ = enumerate_all_tours_edges(
             state.tour_idx_to_tour(), directed=True
         )
-        self.tour_nodes = enumerate_all_tours_nodes(state.tour_idx_to_tour())
-        self.tours = state.tours
+        tour_nodes = enumerate_all_tours_nodes(state.tour_idx_to_tour())
 
-        self.edges_vect, self.nodes_vect, self.first_move_nbh = self._get_first_move_nbh()
+        nbh = cls(
+            tour_edges=tour_edges,
+            tour_nodes=tour_nodes,
+        )
 
-        self.reloc_nbh_vect = None
-        self.cross_nbh_vect = None
-        self.twp_opt_nbh_vect = None
-        self.second_moves = None
-        self.selected_first_actions_k = None
+        nbh.edges_vect, nbh.nodes_vect, nbh.first_move_nbh = nbh._get_first_move_nbh()
+        return nbh
 
 
 def get_edge_embs(e_emb: torch.Tensor, edges: torch.Tensor, symmetric=True) -> torch.Tensor:
@@ -1411,8 +1415,7 @@ def worker(remote, parent_remote, env_fn, env_idx):
             remote.send(env.cur_instance)
 
         elif cmd == 'get_second_move':
-            move_0, action_0 = data
-            remote.send(env.get_second_move(move_0, action_0))
+            remote.send(env.get_second_move(data))
 
         # elif cmd == 'render':
         #     remote.send(env.render())
@@ -1530,9 +1533,9 @@ class SubprocVecEnv:
     def get_first_move_from_states(self):
         pass
 
-    def get_second_move_from_states(self, moves_0, actions_0):
-        for remote, move_0, action_0 in zip(self.remotes, moves_0, actions_0):
-            remote.send(('get_second_move', (move_0, action_0)))
+    def get_second_move_from_states(self, moves_0):
+        for remote, move_0 in zip(self.remotes, moves_0):
+            remote.send(('get_second_move', move_0))
         second_moves = [remote.recv() for remote in self.remotes]
         return second_moves
 
@@ -1639,9 +1642,9 @@ class VRPEnvBase(Env):
             return (self.state, self.best_state)
         return self.state
 
-    def get_second_move(self, move_0, action_0):
+    def get_second_move(self, move_0):
         nbh = self.state.get_nbh()
-        return nbh._get_second_move_nbh(self.state, move_0, action_0)
+        return nbh._get_second_move_nbh(self.state, move_0)
 
     def step(self, action: Dict):
         if self.done:
@@ -1758,8 +1761,106 @@ class VRPEnvRandom(VRPEnvBase):
         )
         return self.get_state()
 
-    def get_second_moves(self, move_0, action_0):
-        return [self.get_second_move(move_0[0], action_0[0])]
+    def get_second_moves(self, move_0):
+        return [self.get_second_move(move_0[0])]
+
+
+class VRPMultiEnvSingleProcAbstract:
+    def __init__(
+        self,
+        reward_mode: VRPReward,
+        num_nodes=10,
+        max_num_steps=50,
+        max_tour_demand=10.,
+        ret_opt_tour=False,
+        num_samples_per_instance=1,
+        num_instance_per_batch=1,
+        seed=42,
+        initializer=VRPInitTour.SINGLETON
+    ):
+        self.num_envs = num_samples_per_instance * num_instance_per_batch
+        self.max_num_steps = max_num_steps
+        self.max_tour_demand = max_tour_demand
+        self.envs = [
+            VRPEnvBase(
+                max_num_steps=max_num_steps,
+                max_tour_demand=max_tour_demand,
+                reward_mode=reward_mode,
+                initializer=initializer
+            ) for _ in range(self.num_envs)
+        ]
+
+        self.num_nodes = num_nodes
+        self.seed = seed
+        assert num_samples_per_instance > 0
+        self.num_samples_per_instance = num_samples_per_instance
+        self.num_instance_per_batch = num_instance_per_batch
+        self.last_instance_id = -1
+        self.ret_opt_tour = ret_opt_tour
+        self.init()
+
+    def init(self):
+        self.cur_instances = [None for _ in range(self.num_samples_per_instance)]
+        self.cur_instance_ids = [None for _ in range(self.num_samples_per_instance)]
+        self.rng = np.random.default_rng(self.seed)
+
+
+    def get_next_instance(self):
+        raise NotImplementedError()
+
+    def reset(self, fetch_next=True, max_num_steps=None):
+        if fetch_next or self.cur_instances[0] is None:
+            instances = []
+            instance_ids = []
+            for i in range(self.num_instance_per_batch):
+                instances.append(self.get_next_instance())
+                instance_ids.append(self.last_instance_id)
+                for j in range(1, self.num_samples_per_instance):
+                    instances.append(copy.deepcopy(instances[-1]))
+                    instance_ids.append(instance_ids[-1])
+            self.cur_instances = instances
+            self.cur_instance_ids = instance_ids
+
+        max_num_steps = max_num_steps if max_num_steps else self.max_num_steps
+        assert len(self.cur_instances) == len(self.envs)
+        states = []
+        for env, cur_instance, cur_instance_id in zip(self.envs, self.cur_instances, self.cur_instance_ids):
+            _state = env.set_instance_as_state(
+                instance=cur_instance,
+                init_tour=None,
+                best_tour=None,
+                id=cur_instance_id,
+                max_num_steps=max_num_steps
+            )
+            states.append(_state)
+        return states
+
+    def reset_episode(self):
+        for cur_instance_id, env in zip(self.cur_instance_ids, self.envs):
+            assert cur_instance_id, "cannot reset episode before setting a run instance"
+            env.set_instance_as_state(
+                instance=env.cur_instance,
+                init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                best_tour=env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                id=cur_instance_id,
+                max_num_steps=env.max_num_steps  # same run, inherit from last episode
+            )
+
+    def step(self, actions):
+        assert len(actions) == self.num_envs
+        results = []
+        for env, action in zip(self.envs, actions):
+            results.append(env.step(action))
+        obs, rews, dones = zip(*results)
+        # return pickle.loads(pickle.dumps(obs, -1)), pickle.loads(pickle.dumps(rews, -1)), pickle.loads(pickle.dumps(dones, -1))
+        return obs, rews, dones
+        # return copy.deepcopy(obs), copy.deepcopy(rews), copy.deepcopy(dones)
+
+    def get_state(self):
+        return [env.get_state() for env in self.envs]
+
+    def get_instance(self):
+        return [env.get_instance() for env in self.envs]
 
 
 class VRPMultiEnvAbstract(Env):
@@ -1841,8 +1942,8 @@ class VRPMultiEnvAbstract(Env):
     def get_instance(self):
         return self.envs.get_instance()
 
-    def get_second_moves(self, moves_0, actions_0: np.ndarray):
-        return self.envs.get_second_move_from_states(moves_0, actions_0)
+    def get_second_moves(self, moves_0):
+        return self.envs.get_second_move_from_states(moves_0)
 
 
 class VRPMultiRandomEnv(VRPMultiEnvAbstract):
@@ -1861,6 +1962,47 @@ class VRPMultiRandomEnv(VRPMultiEnvAbstract):
         return instance
 
 
+class VRPMultiFileEnvSingleProc(VRPMultiEnvSingleProcAbstract):
+    def __init__(self, data_f, results_f=None, *args, **kwargs):
+        self.data_f = data_f
+        self.results_f = results_f
+        super().__init__(*args, **kwargs)
+        self.init()
+
+    def init(self):
+        with open(self.data_f, 'rb') as fp:
+            self.data = pickle.load(fp)
+        random.Random(33).shuffle(self.data)
+        self.data_iter = self.data.__iter__()
+
+    def get_next_instance(self):
+        try:
+            instance = next(self.data_iter)
+        except StopIteration as e:
+            random.Random(33).shuffle(self.data)
+            self.data_iter = self.data.__iter__()
+            instance = next(self.data_iter)
+
+        # format it properly
+        depot = np.array(instance['depot'])
+        nodes = np.array(instance['nodes'])
+        capacity = instance['capacity']
+        opt_dist = instance.get('opt_dist')
+        opt_tour = instance.get('opt_tour')
+        if len(nodes) != self.num_nodes:
+            raise ValueError("Num nodes do not match")
+        if capacity != self.max_tour_demand:
+            raise ValueError("max capacity doesn't match")
+        # demands are assumed to be 1
+        demands = np.ones(shape=(self.num_nodes))
+        coords = np.concatenate((depot[None, :], nodes), axis=0)
+        instance = {
+            'nodes_coord': coords, 'demands': demands, 'opt_dist': opt_dist, 'opt_tour': opt_tour
+        }
+        self.last_instance_id += 1
+        return instance
+
+
 import pickle
 import random
 class VRPMultiFileEnv(VRPMultiEnvAbstract):
@@ -1873,14 +2015,14 @@ class VRPMultiFileEnv(VRPMultiEnvAbstract):
     def init(self):
         with open(self.data_f, 'rb') as fp:
             self.data = pickle.load(fp)
-        random.shuffle(self.data)
+        random.Random(42).shuffle(self.data)
         self.data_iter = self.data.__iter__()
 
     def get_next_instance(self):
         try:
             instance = next(self.data_iter)
         except StopIteration as e:
-            random.shuffle(self.data)
+            random.Random(42).shuffle(self.data)
             self.data_iter = self.data.__iter__()
             instance = next(self.data_iter)
 

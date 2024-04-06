@@ -159,12 +159,12 @@ def write_vrplib(filename, depot, loc, demand, capacity, grid_size, name="proble
 
 if __name__ == "__main__":
 
-    workdir = "/home/ong/personal/deep-ls-tsp/data/vrp-data/size-50"
+    workdir = "/home/ong/personal/deep-ls-tsp/data/vrp-data/size-100"
     executable = "/home/ong/personal/deep-ls-tsp/deepls/LKH-3.0.8/LKH"
     dataset_path = f"{workdir}/vrp_data.pkl"
     out_file = f"{workdir}/vrp_data_with_results.pkl"
 
-    num_data = 10000
+    num_data = 50
     num_workers = 10
 
     from multiprocessing.pool import Pool
