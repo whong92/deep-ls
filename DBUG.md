@@ -6,3 +6,4 @@
 - vectorizing of nbhs types (and reconstruction)
 - vectorizing of states (and associated changes)
 - grouping of multiple envs into each proc
+- NB need to maintain parity with multi file env for all the above changes - check always!
