@@ -12,6 +12,8 @@ from deepls.VRPState import (
     get_edge_embs,
     get_node_embs,
     vectorize_reloc_moves, vectorize_cross_moves, vectorize_twopt_moves,
+    normalize_vectorized_reloc_moves, normalize_vectorized_cross_moves, normalize_vectorized_twoopt_moves,
+    normalize_edges,
     VRPMultiEnvAbstract
 )
 from typing import List, Optional, Dict, Any, Tuple
@@ -102,13 +104,17 @@ class VRPActionNet(nn.Module):
         self,
         x_emb,
         e_emb,
-        edges_vect_all, nodes_vect_all, first_move_nbhs
+        # edges_vect_all, nodes_vect_all, first_move_nbhs
+        edges_moves_vect,
+        nodes_moves_vect,
     ):
         #  ############## embed and sample first move
         edges_vect_concat = []
         nodes_vect_concat = []
         num_edges = []
         num_nodes = []
+        nodes_vect_all = [m['nodes'] for m in nodes_moves_vect]
+        edges_vect_all = [normalize_edges(m['edge']) for m in edges_moves_vect]
         for b, (edges_vect, nodes_vect) in enumerate(zip(edges_vect_all, nodes_vect_all)):
             batch_index_edges = b * np.ones(shape=(len(edges_vect), 1))
             batch_index_nodes = b * np.ones(shape=(len(nodes_vect), 1))
@@ -134,12 +140,12 @@ class VRPActionNet(nn.Module):
         xe_emb_logits_padded = pad_sequence(xe_emb_logits, batch_first=True, padding_value=-float("inf"))
         xe_emb_logits_padded = xe_emb_logits_padded.squeeze(-1)
 
-        return xe_emb_logits_padded, first_move_nbhs
+        return xe_emb_logits_padded # , first_move_nbhs
 
     @staticmethod
     def sample_moves_given_logits(
         move_logits: torch.Tensor,
-        moves: List[List[Dict[str, Any]]],
+        # moves: List[List[Dict[str, Any]]],
         tau: float = 1.0,
         greedy: bool = False,
         actions: Optional[torch.Tensor] = None,  # B x k
@@ -156,8 +162,8 @@ class VRPActionNet(nn.Module):
         ent = tour_dist.entropy()
         # convert action indices into the action actions_0
         # these can be replaced by chosen moves
-        moves = [nbh[action_idx] for action_idx, nbh in zip(actions, moves)]
-        return actions, moves, pi, ent
+        # moves = [nbh[action_idx] for action_idx, nbh in zip(actions, moves)]
+        return actions, pi, ent
 
     @staticmethod
     def vectorize_moves(reloc_nbh=None, cross_nbh=None, twp_opt_nbh=None):
@@ -216,7 +222,7 @@ class VRPActionNet(nn.Module):
         reloc_nbh_vects,
         cross_nbh_vects,
         two_opt_nbh_vects,
-        second_move_list
+        # second_move_list
     ):
         # TODO: condition second move on first move's embedding! (but with gradients truncated)!
         all_moves_embedded = self.embed_vectorized_moves(
@@ -231,31 +237,30 @@ class VRPActionNet(nn.Module):
             all_moves_logits, batch_first=True, padding_value=-float("inf")
         ).squeeze(-1)
 
-        return all_moves_logits_padded, second_move_list
+        return all_moves_logits_padded #, second_move_list
 
     def _get_first_moves_from_nbhs(self, nbhs: List[VRPNbHAutoReg]):
-        edges_vect_all = []
-        nodes_vect_all = []
-        first_move_nbhs = []
+        edges_moves_all = []
+        nodes_moves_all = []
         for nbh in nbhs:
-            first_move_nbhs.append(nbh.first_move_nbh)
-            edges_vect_all.append(nbh.edges_vect)
-            nodes_vect_all.append(nbh.nodes_vect)
-        return edges_vect_all, nodes_vect_all, first_move_nbhs
+            edges_moves_all.append(nbh.first_moves.edge_moves_vect)
+            nodes_moves_all.append(nbh.first_moves.node_moves_vect)
+        return edges_moves_all, nodes_moves_all
 
     @staticmethod
     def _get_second_moves_from_nbhs(nbhs: List[VRPNbHAutoReg]):
         reloc_nbh_vects = []
         cross_nbh_vects = []
         two_opt_nbh_vects = []
-        second_move_list = []
+        # second_move_list = []
         selected_first_actions_k = []
         for nbh in nbhs:
-            reloc_nbh_vects.append(nbh.reloc_nbh_vect)
-            cross_nbh_vects.append(nbh.cross_nbh_vect)
-            two_opt_nbh_vects.append(nbh.twp_opt_nbh_vect)
-            second_move_list.append(nbh.second_moves)
-        return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list, selected_first_actions_k
+            reloc_nbh_vects.append(nbh.second_moves.reloc_nbh_vect)
+            cross_nbh_vects.append(nbh.second_moves.cross_nbh_vect)
+            two_opt_nbh_vects.append(nbh.second_moves.twp_opt_nbh_vect)
+            # second_move_list.append(nbh.second_moves)
+            # return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list, selected_first_actions_k
+        return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects
 
     # @staticmethod
     # def _make_second_moves_from_states(
@@ -309,20 +314,23 @@ class VRPActionNet(nn.Module):
         self,
         moves_0: List,
         nbhs: List[VRPNbHAutoReg],
-        states: List[VRPState]
+        # states: List[VRPState],
+        envs: VRPMultiEnvAbstract
     ):
         reloc_nbh_vects = []
         cross_nbh_vects = []
         two_opt_nbh_vects = []
-        second_move_list = []
-        results = [nbh._get_second_move_nbh(state, move_0) for state, move_0, nbh in zip(states, moves_0, nbhs)]
-        for nbh, result in zip(nbhs, results):
-            nbh.reloc_nbh_vect, nbh.cross_nbh_vect, nbh.twp_opt_nbh_vect, nbh.second_moves = result
-            reloc_nbh_vects.append(nbh.reloc_nbh_vect)
-            cross_nbh_vects.append(nbh.cross_nbh_vect)
-            two_opt_nbh_vects.append(nbh.twp_opt_nbh_vect)
-            second_move_list.append(nbh.second_moves)
-        return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list
+        # second_move_list = []
+        # TODO: this will be run in the env
+        # results = [nbh._get_second_move_nbh(state, move_0) for state, move_0, nbh in zip(states, moves_0, nbhs)]
+        second_moves = envs.get_second_moves(moves_0)
+        for nbh, _second_move in zip(nbhs, second_moves):
+            nbh.second_moves = _second_move
+            reloc_nbh_vects.append(nbh.second_moves.reloc_nbh_vect)
+            cross_nbh_vects.append(nbh.second_moves.cross_nbh_vect)
+            two_opt_nbh_vects.append(nbh.second_moves.twp_opt_nbh_vect)
+            # second_move_list.append(nbh.second_moves)
+        return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects  # , second_move_list
 
     def forward_autoreg(
         self,
@@ -338,25 +346,84 @@ class VRPActionNet(nn.Module):
         x_emb, e_emb = self.rgcn(x_cat, x_edges_values, x_nodes_coord)
         # x_emb = self.rgcn(x_nodes_coord)
 
-        nbhs = [VRPNbHAutoReg.init_from_state(state) for state in states]
-
-        edges_vect_all, nodes_vect_all, first_move_nbhs = self._get_first_moves_from_nbhs(nbhs)
-        first_move_logits, first_move_nbhs = self.get_first_move_logits(
+        # TODO instantiate without state, get first moves from env
+        # nbhs = [VRPNbHAutoReg.init_from_state(state) for state in states]
+        first_moves = envs.get_first_moves()
+        nbhs = [VRPNbHAutoReg(first_moves=_first_moves) for _first_moves in first_moves]
+        edges_moves_all, nodes_moves_all = self._get_first_moves_from_nbhs(nbhs)
+        first_move_logits = self.get_first_move_logits(
             x_emb,
             e_emb,
-            edges_vect_all, nodes_vect_all, first_move_nbhs
+            edges_moves_all, nodes_moves_all
         )
-        actions_0, moves_0, pi_0, _ = self.sample_moves_given_logits(first_move_logits, first_move_nbhs,
-                                                                     device=self.device, greedy=False)
+        actions_0, pi_0, _ = self.sample_moves_given_logits(first_move_logits, device=self.device, greedy=False)
+        moves_0 = []
+        for batch, action_idx in enumerate(actions_0):
+            edges_moves = edges_moves_all[batch]
+            nodes_moves = nodes_moves_all[batch]
+            n_node_moves = len(nodes_moves['nodes'])
+            if action_idx < n_node_moves:
+                moves_0.append({
+                    'type': 'node',
+                    'node': nodes_moves['nodes'][action_idx],
+                    'tour_idx': nodes_moves['tour_idx'][action_idx]
+                })
+            else:
+                moves_0.append({
+                    'type': 'edge',
+                    'edge': edges_moves['edge'][action_idx - n_node_moves],
+                    'tour_idx': edges_moves['tour_idx'][action_idx - n_node_moves]
+                })
 
-        reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list = \
-            self._make_second_moves_multiproc_env(moves_0, nbhs, states)
+        reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects = \
+            self._make_second_moves_multiproc_env(moves_0, nbhs, envs)
+
+        reloc_nbh_vects_normalized, cross_nbh_vects_normalized, two_opt_nbh_vects_normalized = [], [], []
+        for _reloc_nbh_vects, _cross_nbh_vects, _two_opt_nbh_vects in zip(
+                reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects
+        ):
+            reloc_nbh_vects_normalized.append(normalize_vectorized_reloc_moves(_reloc_nbh_vects))
+            cross_nbh_vects_normalized.append(normalize_vectorized_cross_moves(_cross_nbh_vects))
+            two_opt_nbh_vects_normalized.append(normalize_vectorized_twoopt_moves(_two_opt_nbh_vects))
 
         # assert False
-        second_moves_logits_padded, second_move_list = \
-            self.get_second_move_logits(e_emb, reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list)
-        actions_1, moves_1, pi_1, _ = self.sample_moves_given_logits(second_moves_logits_padded, second_move_list,
-                                                                     device=self.device, greedy=False)
+        second_moves_logits_padded = \
+            self.get_second_move_logits(e_emb, reloc_nbh_vects_normalized, cross_nbh_vects_normalized,
+                                        two_opt_nbh_vects_normalized)
+        actions_1, pi_1, _ = self.sample_moves_given_logits(second_moves_logits_padded,
+                                                            device=self.device, greedy=False)
+        moves_1 = []
+        # print(reloc_nbh_vects)
+        for batch, action_idx in enumerate(actions_1):
+            _reloc_nbh_vect = reloc_nbh_vects[batch]
+            _cross_nbh_vect = cross_nbh_vects[batch]
+            _two_opt_nbh_vect = two_opt_nbh_vects[batch]
+            n_reloc_moves = len(_reloc_nbh_vect['src_node'])
+            n_cross_moves = len(_cross_nbh_vect['e0'])
+            # print(n_reloc_moves, n_cross_moves, len(_two_opt_nbh_vect['e0']), action_idx)
+            if action_idx < n_reloc_moves:
+                move_1 = {'nb_type': 'reloc'}
+                keys = ["tour0", "tour1", "src_node", "src_u", "src_v", "dst_w", "dst_wp", "src_up", "src_vp", "cost"]
+                for key in keys:
+                    move_1[key] = _reloc_nbh_vect[key][action_idx]
+                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
+                moves_1.append(move_1)
+            elif action_idx < (n_cross_moves + n_reloc_moves):
+                _action_idx = action_idx - n_reloc_moves
+                move_1 = {'nb_type': 'cross'}
+                keys = ["tour0", "tour1", "e0", "e1", "e0p", "e1p", "cost"]
+                for key in keys:
+                    move_1[key] = _cross_nbh_vect[key][_action_idx]
+                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
+                moves_1.append(move_1)
+            else:
+                _action_idx = action_idx - n_reloc_moves - n_cross_moves
+                move_1 = {'nb_type': '2opt'}
+                keys = ["tour_idx", "e0", "e1", "e0p", "e1p", "cost"]
+                for key in keys:
+                    move_1[key] = _two_opt_nbh_vect[key][_action_idx]
+                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
+                moves_1.append(move_1)
         # print(moves_1)
         #
         actions = torch.stack([actions_0, actions_1], dim=1)
@@ -392,25 +459,82 @@ class VRPActionNet(nn.Module):
         x_cat = torch.stack([x_tour, x_best_tour], dim=3)
         x_emb, e_emb = self.rgcn(x_cat, x_edges_values, x_nodes_coord)
 
-        edges_vect_all, nodes_vect_all, first_move_nbhs = self._get_first_moves_from_nbhs(nbhs)
-        first_move_logits, first_move_nbhs = self.get_first_move_logits(
+        edges_moves_all, nodes_moves_all = self._get_first_moves_from_nbhs(nbhs)
+        first_move_logits = self.get_first_move_logits(
             x_emb,
             e_emb,
-            edges_vect_all, nodes_vect_all, first_move_nbhs
+            edges_moves_all, nodes_moves_all
         )
 
-        actions_0, moves_0, pi_0, ent_0 = self.sample_moves_given_logits(first_move_logits, first_move_nbhs, actions=actions[:, 0], device=self.device)
+        actions_0, pi_0, ent_0 = self.sample_moves_given_logits(first_move_logits, device=self.device, greedy=False)
+        moves_0 = []
+        for batch, action_idx in enumerate(actions_0):
+            edges_moves = edges_moves_all[batch]
+            nodes_moves = nodes_moves_all[batch]
+            n_node_moves = len(nodes_moves['nodes'])
+            if action_idx < n_node_moves:
+                moves_0.append({
+                    'type': 'node',
+                    'node': nodes_moves['nodes'][action_idx],
+                    'tour_idx': nodes_moves['tour_idx'][action_idx]
+                })
+            else:
+                moves_0.append({
+                    'type': 'edge',
+                    'edge': edges_moves['edge'][action_idx - n_node_moves],
+                    'tour_idx': edges_moves['tour_idx'][action_idx - n_node_moves]
+                })
 
-        reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list, selected_first_actions_k = (
+        reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects = (
             self._get_second_moves_from_nbhs(nbhs)
         )
 
-        second_moves_logits_padded, second_move_list = self.get_second_move_logits(
-            e_emb, reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list
-        )
+        # move the following into get_second_move_logits?
+        reloc_nbh_vects_normalized, cross_nbh_vects_normalized, two_opt_nbh_vects_normalized = [], [], []
+        for _reloc_nbh_vects, _cross_nbh_vects, _two_opt_nbh_vects in zip(
+                reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects
+        ):
+            reloc_nbh_vects_normalized.append(normalize_vectorized_reloc_moves(_reloc_nbh_vects))
+            cross_nbh_vects_normalized.append(normalize_vectorized_cross_moves(_cross_nbh_vects))
+            two_opt_nbh_vects_normalized.append(normalize_vectorized_twoopt_moves(_two_opt_nbh_vects))
 
-        actions_1, moves_1, pi_1, ent_1 = self.sample_moves_given_logits(second_moves_logits_padded, second_move_list,
-                                                                         actions=actions[:, 1], device=self.device)
+        # assert False
+        second_moves_logits_padded = \
+            self.get_second_move_logits(e_emb, reloc_nbh_vects_normalized, cross_nbh_vects_normalized,
+                                        two_opt_nbh_vects_normalized)
+        actions_1, pi_1, ent_1 = self.sample_moves_given_logits(second_moves_logits_padded,
+                                                                device=self.device, greedy=False)
+        moves_1 = []
+        for batch, action_idx in enumerate(actions_1):
+            _reloc_nbh_vect = reloc_nbh_vects[batch]
+            _cross_nbh_vect = cross_nbh_vects[batch]
+            _two_opt_nbh_vect = two_opt_nbh_vects[batch]
+            n_reloc_moves = len(_reloc_nbh_vect['src_node'])
+            n_cross_moves = len(_cross_nbh_vect['e0'])
+            # print(n_reloc_moves, n_cross_moves, len(_two_opt_nbh_vect['e0']), action_idx)
+            if action_idx < n_reloc_moves:
+                move_1 = {'nb_type': 'reloc'}
+                keys = ["tour0", "tour1", "src_node", "src_u", "src_v", "dst_w", "dst_wp", "src_up", "src_vp", "cost"]
+                for key in keys:
+                    move_1[key] = _reloc_nbh_vect[key][action_idx]
+                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
+                moves_1.append(move_1)
+            elif action_idx < (n_cross_moves + n_reloc_moves):
+                _action_idx = action_idx - n_reloc_moves
+                move_1 = {'nb_type': 'cross'}
+                keys = ["tour0", "tour1", "e0", "e1", "e0p", "e1p", "cost"]
+                for key in keys:
+                    move_1[key] = _cross_nbh_vect[key][_action_idx]
+                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
+                moves_1.append(move_1)
+            else:
+                _action_idx = action_idx - n_reloc_moves - n_cross_moves
+                move_1 = {'nb_type': '2opt'}
+                keys = ["tour_idx", "e0", "e1", "e0p", "e1p", "cost"]
+                for key in keys:
+                    move_1[key] = _two_opt_nbh_vect[key][_action_idx]
+                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
+                moves_1.append(move_1)
         pi = pi_0 + pi_1
         ent = ent_0 + ent_1
         moves = list(zip(moves_0, moves_1))

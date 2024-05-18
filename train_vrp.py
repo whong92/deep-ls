@@ -284,7 +284,7 @@ if __name__ == "__main__":
         # we don't have a convergence issue anyways, so this was purely for intellectual interest
         'use_ppo_update': False,
         # use for initial pre-train only
-        'entropy_bonus': 0.02,
+        'entropy_bonus': 0.002,
         'gamma': 0.99,
         # architecture settings
         'model': {
@@ -297,7 +297,7 @@ if __name__ == "__main__":
             "num_edge_cat_features": 2
         },
         'optim': {
-            'step_size': 1e-4,
+            'step_size': 1e-5,
             'step_size_critic': 5e-4,
             'beta_m': 0.9,
             'beta_v': 0.999,

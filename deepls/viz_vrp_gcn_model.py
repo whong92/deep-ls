@@ -48,7 +48,16 @@ agent.load(f'{workdir}/model/vrp-50-nodes-lr-2e-6-beta-2e-3-longer-delta-cost-si
 agent.set_eval()
 # agent.set_train()
 
-envs = VRPMultiFileEnvSingleProc(
+# envs = VRPMultiFileEnvSingleProc(
+#     data_f=f'{workdir}/data/vrp-data/size-50/vrp_data_with_results.pkl',
+#     num_nodes=N,
+#     max_num_steps=num_steps,
+#     max_tour_demand=max_tour_demand,
+#     num_samples_per_instance=12,
+#     num_instance_per_batch=1,
+#     reward_mode=VRPReward.DELTA_COST
+# )
+envs = VRPMultiFileEnv(
     data_f=f'{workdir}/data/vrp-data/size-50/vrp_data_with_results.pkl',
     num_nodes=N,
     max_num_steps=num_steps,
@@ -107,5 +116,5 @@ opts_all = {
     'state_opts_all': state_opts_all,
     'best_opts_all': best_opts_all,
 }
-with open("viz_eval_opts_all_beta_2e-3_long_delta.json", "w") as fp:
+with open("viz_eval_opts_all_beta_2e-3_long_delta_vectorized_impl.json", "w") as fp:
     json.dump(opts_all, fp)
