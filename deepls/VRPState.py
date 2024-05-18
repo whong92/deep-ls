@@ -38,18 +38,17 @@ def tour_nodes_to_cum_demands(tour_nodes: np.ndarray, demands: np.ndarray):
 def enumerate_all_tours_edges(
     tours: Dict[int, np.ndarray],
     directed=False
-) -> Tuple[Dict[int, np.ndarray], np.ndarray]:
+) -> Dict[int, np.ndarray]:
     """Helper function to convert ordered list of tour nodes to edge adjacency matrix.
     """
     N = sum([len(tour) for tour in tours.values()])
-    W = np.zeros((N + 1, N + 1))
+    # W = np.zeros((N + 1, N + 1))
     all_tours_edges = {}
     for tour_idx, tour in tours.items():
         edges = enumerate_tour_edges(tour, directed=directed)
         all_tours_edges[tour_idx] = edges
-        for u, v in edges:
-            W[u, v] = 1
-    return all_tours_edges, W
+        # W[edges[:, 0], edges[:, 1]] = 1
+    return all_tours_edges # , W
 
 
 def enumerate_all_tours_nodes(tours: Dict[int, np.ndarray]) -> Dict[int, np.ndarray]:
@@ -63,22 +62,34 @@ def enumerate_tour_edges(nodes: np.ndarray, directed=False):
     N = len(nodes)
     assert N > 0
 
-    edges = []
+    # edges = []
     # edit: assumed added
     # Add initial connection from depot
     # edges = [(0, int(nodes[0]))]
     # if not directed:
     #     edges.append((int(nodes[0]), 0))
-    for idx in range(len(nodes) - 1):
-        i = int(nodes[idx])
-        j = int(nodes[idx + 1])
-        edges.append((i, j))
-        if not directed:
-            edges.append((j, i))
+
+    # for idx in range(len(nodes) - 1):
+    #     i = int(nodes[idx])
+    #     j = int(nodes[idx + 1])
+    #     edges.append((i, j))
+    #     if not directed:
+    #         edges.append((j, i))
+
     # edit: assumed added
     # Add final connection of tour to depot
     # edges.append((int(nodes[N - 1]), 0))
     # edges.append((0, int(nodes[N - 1])))
+    edges = np.stack([
+        nodes[:-1],
+        nodes[1:]
+    ], axis=1)
+    if not directed:
+        edges_ji = np.stack([
+            nodes[1:],
+            nodes[:-1],
+        ], axis=1)
+        edges = np.concatenate((edges, edges_ji), axis=0)
     return np.array(edges)
 
 
@@ -372,18 +383,6 @@ class VRPState:
             return np.concatenate((np.array([0.]), self.node_demands))
         return self.node_demands
 
-    @classmethod
-    def copy_construct(cls, other: 'VRPState'):
-        return VRPState(
-            other.nodes_coord,
-            other.node_demands,
-            other.max_tour_demand,
-            tours_init=other.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-            id=other.id,
-            opt_tour_dist=other.opt_tour_dist,
-            init_tour=other.init_tour
-        )
-
     def __init__(
         self,
         nodes_coord: np.ndarray,  # depot is always node 0,
@@ -451,7 +450,8 @@ class VRPState:
                         'node_pos': tour_nodes_to_node_rep(tour),
                         'cum_dems': tour_nodes_to_cum_demands(tour, self.node_demands)
                     }
-        # self.nbh = self.make_nbh()
+        self.tour_adj = self._make_tours_adj(directed=False, sum=True)
+        self.nbh = self.make_nbh()
 
     def all_tours_as_list(self, remove_last_depot=False, remove_first_depot=False):
         all_tours_list = [t['tour'] for t in self.tours.values()]
@@ -467,33 +467,60 @@ class VRPState:
             all_tours_dict = {ti: t[:-1] for ti, t in all_tours_dict.items()}
         return all_tours_dict
 
-    def get_tours_adj(self, directed=False, sum=False):
+    def _make_tours_adj(self, directed=False, sum=False):
         tours = self.all_tours_as_list(remove_last_depot=True)
         W = np.zeros((self.N + 1, self.N + 1))
         for tour in tours:
-            for idx in range(len(tour) - 1):
-                i = int(tour[idx])
-                j = int(tour[idx + 1])
-                if sum:
-                    W[i][j] += 1
-                else:
-                    W[i][j] = 1
-                if not directed:
-                    if sum:
-                        W[j][i] += 1
-                    else:
-                        W[j][i] = 1
-                # Add final connection of tour in edge target
+            # tours = self.all_tours_as_list(remove_last_depot=True)
+            # W = np.zeros((self.N + 1, self.N + 1))
+            # for tour in tours:
+            #     for idx in range(len(tour) - 1):
+            #         i = int(tour[idx])
+            #         j = int(tour[idx + 1])
+            #         if sum:
+            #             W[i][j] += 1
+            #         else:
+            #             W[i][j] = 1
+            #         if not directed:
+            #             if sum:
+            #                 W[j][i] += 1
+            #             else:
+            #                 W[j][i] = 1
+            #         # Add final connection of tour in edge target
+            #     if sum:
+            #         W[j][int(tour[0])] += 1
+            #     else:
+            #         W[j][int(tour[0])] = 1
+            #     if not directed:
+            #         if sum:
+            #             W[int(tour[0])][j] += 1
+            #         else:
+            #             W[int(tour[0])][j] = 1
+
+            # vectorized impl
             if sum:
-                W[j][int(tour[0])] += 1
+                W[tour[:-1], tour[1:]] += 1
             else:
-                W[j][int(tour[0])] = 1
+                W[tour[:-1], tour[1:]] = 1
             if not directed:
                 if sum:
-                    W[int(tour[0])][j] += 1
+                    W[tour[1:], tour[:-1]] += 1
                 else:
-                    W[int(tour[0])][j] = 1
+                    W[tour[1:], tour[:-1]] = 1
+                # Add final connection of tour in edge target
+            if sum:
+                W[tour[-1]][int(tour[0])] += 1
+            else:
+                W[tour[-1]][int(tour[0])] = 1
+            if not directed:
+                if sum:
+                    W[int(tour[0])][tour[-1]] += 1
+                else:
+                    W[int(tour[0])][tour[-1]] = 1
         return W
+
+    def get_tours_adj(self, directed=False, sum=False):
+        return self.tour_adj
 
     def get_tour_lens(self, exclude_depot=True):
         all_tours_len = {ti: len(t['tour']) for ti, t in self.tours.items()}
@@ -540,7 +567,8 @@ class VRPState:
             )
         else:
             raise ValueError("Invalid move type")
-        # self.nbh = self.make_nbh()
+        self.tour_adj = self._make_tours_adj(directed=False, sum=True)
+        self.nbh = self.make_nbh()
 
     def _apply_cross_move(
         self,
@@ -982,19 +1010,24 @@ def flatten_deduplicate_2opt_nbh(
 
 from dataclasses import dataclass
 
+@dataclass
+class VRPFirstMoves:
+    edge_moves_vect: Optional[Dict[str, np.ndarray]] = None
+    node_moves_vect: Optional[Dict[str, np.ndarray]] = None
+
+@dataclass
+class VRPSecondMoves:
+    reloc_nbh_vect: Optional[Dict[str, np.ndarray]] = None
+    cross_nbh_vect: Optional[Dict[str, np.ndarray]] = None
+    twp_opt_nbh_vect: Optional[Dict[str, np.ndarray]] = None
+
 
 @dataclass
 class VRPNbHAutoReg:
-    tour_edges: Dict[int, np.ndarray]
-    tour_nodes: Dict[int, np.ndarray]
-    edges_vect: Optional[np.ndarray] = None
-    nodes_vect: Optional[np.ndarray] = None
-    first_move_nbh: Optional[np.ndarray] = None
-    reloc_nbh_vect: Optional[np.ndarray] = None
-    cross_nbh_vect: Optional[np.ndarray] = None
-    twp_opt_nbh_vect: Optional[np.ndarray] = None
-    selected_first_actions_k: Optional[np.ndarray] = None
-    second_moves = None
+    tour_edges: Optional[Dict[int, np.ndarray]] = None
+    tour_nodes: Optional[Dict[int, np.ndarray]] = None
+    first_moves: Optional[VRPFirstMoves] = None
+    second_moves: Optional[VRPSecondMoves] = None
 
     @staticmethod
     def vectorize_moves(reloc_nbh=None, cross_nbh=None, twp_opt_nbh=None):
@@ -1012,34 +1045,35 @@ class VRPNbHAutoReg:
         return reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect
 
     def _get_first_move_nbh(self):
-        first_move_nbh = []
         edges_vect = []
         nodes_vect = []
         tour_idxs = []
+        node_moves_vect = {}
         for tour_idx, tour_nodes in self.tour_nodes.items():
             _tour_nodes = tour_nodes[1:-1]
             nodes_vect.append(_tour_nodes)  # we don't want depot nodes here
-            first_move_nbh.extend(
-                [{'type': 'node', 'node': n, 'tour_idx': tour_idx} for n in _tour_nodes]
-            )
+            tour_idxs.append(np.ones_like(_tour_nodes) * tour_idx)
+        nodes_vect = np.concatenate(nodes_vect, axis=0)  # num_nodes
+        node_moves_vect['nodes'] = nodes_vect
+        node_moves_vect['tour_idx'] = np.concatenate(tour_idxs)
+
+        tour_idxs = []
+        edge_moves_vect = {}
         for tour_idx, tour_edges in self.tour_edges.items():
             edges_vect.append(tour_edges)
-            first_move_nbh.extend(
-                [{'type': 'edge', 'edge': e, 'tour_idx': tour_idx} for e in tour_edges]
-            )
-
+            tour_idxs.append(np.ones_like(tour_edges[:, 0]) * tour_idx)
         edges_vect = np.concatenate(edges_vect, axis=0)  # num_edges x 2
-        edges_vect = normalize_edges(edges_vect)
-        nodes_vect = np.concatenate(nodes_vect, axis=0)  # num_nodes
+        edge_moves_vect['edge'] = edges_vect
+        edge_moves_vect['tour_idx'] = np.concatenate(tour_idxs)
 
-        return edges_vect, nodes_vect, first_move_nbh
+        return VRPFirstMoves(edge_moves_vect, node_moves_vect)
 
     def _get_second_move_nbh(
         self,
         state: VRPState,
         move_0
     ):
-        second_moves = []
+        # second_moves = []
         if move_0['type'] == 'node':
             node = move_0['node']
             node_tour = move_0['tour_idx']
@@ -1056,7 +1090,7 @@ class VRPNbHAutoReg:
                 state.max_tour_demand
             )
             reloc_nbh = list(reloc_nbh.values())
-            second_moves = reloc_nbh
+            # second_moves = reloc_nbh
 
             reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves(reloc_nbh, [], [])
         elif move_0['type'] == 'edge':
@@ -1083,13 +1117,15 @@ class VRPNbHAutoReg:
             two_opt_nbh = list(two_opt_nbh.values())
 
             reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves([], cross_nbh, two_opt_nbh)
-            second_moves = cross_nbh + two_opt_nbh
+            # second_moves = cross_nbh + two_opt_nbh
+        else:
+            raise ValueError("Fuck me")
 
-        return reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect, second_moves
+        return VRPSecondMoves(reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect)
 
     @classmethod
     def init_from_state(cls, state: VRPState):
-        tour_edges, _ = enumerate_all_tours_edges(
+        tour_edges = enumerate_all_tours_edges(
             state.tour_idx_to_tour(), directed=True
         )
         tour_nodes = enumerate_all_tours_nodes(state.tour_idx_to_tour())
@@ -1099,7 +1135,7 @@ class VRPNbHAutoReg:
             tour_nodes=tour_nodes,
         )
 
-        nbh.edges_vect, nbh.nodes_vect, nbh.first_move_nbh = nbh._get_first_move_nbh()
+        nbh.first_moves = nbh._get_first_move_nbh()
         return nbh
 
 
@@ -1145,21 +1181,18 @@ def vectorize_cross_moves(cross_moves):
             for i, cross_move in enumerate(cross_moves):
                 edge = cross_move[key]
                 e0, e1 = edge
-                if e0 == -1:
-                    e0 = 0
-                if e1 == -1:
-                    e1 = 0
-                if e0 > e1:
-                    e0, e1 = e1, e0
+                # if e0 == -1:
+                #     e0 = 0
+                # if e1 == -1:
+                #     e1 = 0
+                # if e0 > e1:
+                #     e0, e1 = e1, e0
                 vectorized[key][i, 0] = e0
                 vectorized[key][i, 1] = e1
-            # vectorized[key] = np.stack([
-            #     normalize_edge(np.array(cross_move[key]))
-            #     for cross_move in cross_moves
-            # ], axis=0)
-    vectorized['cost'] = np.array(
-        [reloc_move['cost'] for reloc_move in cross_moves]
-    )[:, None]
+    for key in ['tour0', 'tour1', 'cost']:
+        vectorized[key] = np.array(
+            [reloc_move[key] for reloc_move in cross_moves]
+        )[:, None]
     return vectorized
 
 
@@ -1178,21 +1211,18 @@ def vectorize_reloc_moves(reloc_moves):
             for i, reloc_move in enumerate(reloc_moves):
                 edge = reloc_move[key]
                 e0, e1 = edge
-                if e0 == -1:
-                    e0 = 0
-                if e1 == -1:
-                    e1 = 0
-                if e0 > e1:
-                    e0, e1 = e1, e0
+                # if e0 == -1:
+                #     e0 = 0
+                # if e1 == -1:
+                #     e1 = 0
+                # if e0 > e1:
+                #     e0, e1 = e1, e0
                 vectorized[key][i, 0] = e0
                 vectorized[key][i, 1] = e1
-            # vectorized[key] = np.stack([
-            #     normalize_edge(np.array(reloc_move[key]))
-            #     for reloc_move in reloc_moves
-            # ], axis=0)
-    vectorized['cost'] = np.array(
-        [reloc_move['cost'] for reloc_move in reloc_moves]
-    )[:, None]
+    for key in ['tour0', 'tour1', 'src_node', 'cost']:
+        vectorized[key] = np.array(
+            [reloc_move[key] for reloc_move in reloc_moves]
+        )[:, None]
     return vectorized
 
 
@@ -1211,22 +1241,46 @@ def vectorize_twopt_moves(twopt_moves):
             for i, twopt_move in enumerate(twopt_moves):
                 edge = twopt_move[key]
                 e0, e1 = edge
-                if e0 == -1:
-                    e0 = 0
-                if e1 == -1:
-                    e1 = 0
-                if e0 > e1:
-                    e0, e1 = e1, e0
+                # if e0 == -1:
+                #     e0 = 0
+                # if e1 == -1:
+                #     e1 = 0
+                # if e0 > e1:
+                #     e0, e1 = e1, e0
                 vectorized[key][i, 0] = e0
                 vectorized[key][i, 1] = e1
-            # vectorized[key] = np.stack([
-            #     normalize_edge(np.array(twopt_move[key]))
-            #     for twopt_move in twopt_moves
-            # ], axis=0)
-    vectorized['cost'] = np.array(
-        [reloc_move['cost'] for reloc_move in twopt_moves]
-    )[:, None]
+    for key in ['tour_idx', 'cost']:
+        vectorized[key] = np.array(
+            [reloc_move[key] for reloc_move in twopt_moves]
+        )[:, None]
     return vectorized
+
+
+def normalize_vectorized_twoopt_moves(twopt_moves):
+    twoopt_moves_normalized = {}
+    for key in ['e0', 'e1', 'e0p', 'e1p']:
+        twoopt_moves_normalized[key] = normalize_edges(twopt_moves[key])
+    for key in ['tour_idx', 'cost']:
+        twoopt_moves_normalized[key] = normalize_edges(twopt_moves[key])
+    return twoopt_moves_normalized
+
+
+def normalize_vectorized_cross_moves(twopt_moves):
+    cross_moves_normalized = {}
+    for key in ['e0', 'e1', 'e0p', 'e1p']:
+        cross_moves_normalized[key] = normalize_edges(twopt_moves[key])
+    for key in ['tour0', 'tour1', 'cost']:
+        cross_moves_normalized[key] = normalize_edges(twopt_moves[key])
+    return cross_moves_normalized
+
+
+def normalize_vectorized_reloc_moves(twopt_moves):
+    reloc_moves_normalized = {}
+    for key in ['src_u', 'src_v', 'dst_w', 'src_up', 'src_vp', 'dst_wp']:
+        reloc_moves_normalized[key] = normalize_edges(twopt_moves[key])
+    for key in ['tour0', 'tour1', 'src_node', 'cost']:
+        reloc_moves_normalized[key] = normalize_edges(twopt_moves[key])
+    return reloc_moves_normalized
 
 
 def embed_cross_heuristic(cross_moves_vectorized, edge_embeddings: torch.Tensor, cross_move_mlp: torch.nn.Module, cost_mlp: torch.nn.Module):
@@ -1369,53 +1423,65 @@ import cloudpickle
 
 def worker(remote, parent_remote, env_fn, env_idx):
     parent_remote.close()
-    env: VRPEnvBase = env_fn()
-    env.init()
+    envs: List[VRPEnvBase] = env_fn()
+    for env in envs:
+        env.init()
     np.random.seed(env_idx)
 
-    cur_instance = None
-    cur_instance_id = None
-    max_num_steps = None
+    cur_instance_ids = None
+    max_num_stepss = None
 
     while True:
         cmd, data = remote.recv()
 
         if cmd == 'step':
-            action = data
-            ob, reward, done = env.step(action)
-            remote.send((ob, reward, done))
+            actions = data
+            ret = []
+            for action, env in zip(actions, envs):
+                ob, reward, done = env.step(action)
+                ret.append((ob, reward, done))
+            remote.send(ret)
 
         # elif cmd == 'reset':
         #     remote.send(env.reset())
 
         elif cmd == 'reset_episode':
-            assert cur_instance_id, "cannot reset episode before setting a run instance"
-            remote.send(env.set_instance_as_state(
-                instance=env.cur_instance,
-                init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-                best_tour=env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-                id=cur_instance_id,
-                max_num_steps=max_num_steps
-            ))
+            assert cur_instance_ids, "cannot reset episode before setting a run instance"
+            remote.send([
+                env.set_instance_as_state(
+                    instance=env.cur_instance,
+                    init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                    best_tour=env.best_state_tour, # env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                    id=cur_instance_id,
+                    max_num_steps=max_num_steps
+                ) for env, cur_instance_id, max_num_steps in zip(envs, cur_instance_ids, max_num_stepss)
+            ])
         
         elif cmd == 'set_instance_run':
-            cur_instance, cur_instance_id, max_num_steps = data
-            remote.send(env.set_instance_as_state(
-                instance=cur_instance,
-                init_tour=None,
-                best_tour=None,
-                id=cur_instance_id,
-                max_num_steps=max_num_steps
-            ))
+            cur_instances, cur_instance_ids, max_num_stepss = data
+            remote.send([
+                env.set_instance_as_state(
+                    instance=cur_instance,
+                    init_tour=None,
+                    best_tour=None,
+                    id=cur_instance_id,
+                    max_num_steps=max_num_steps
+                ) for env, cur_instance, cur_instance_id, max_num_steps in
+                zip(envs, cur_instances, cur_instance_ids, max_num_stepss)
+            ])
 
         elif cmd == 'get_state':
-            remote.send(env.get_state())
+            remote.send([env.get_state() for env in envs])
 
         elif cmd == 'get_instance':
-            remote.send(env.cur_instance)
+            remote.send([env.cur_instance for env in envs])
+
+        elif cmd == 'get_first_move':
+            remote.send([env.get_first_move() for env in envs])
 
         elif cmd == 'get_second_move':
-            remote.send(env.get_second_move(data))
+            first_movess = data
+            remote.send([env.get_second_move(first_move) for env, first_move in zip(envs, first_movess)])
 
         # elif cmd == 'render':
         #     remote.send(env.render())
@@ -1446,18 +1512,34 @@ class CloudpickleWrapper(object):
         return self.x()
 
 
-def make_mp_envs(num_env, num_steps, max_tour_demand, reward_mode, initializer):
+def make_mp_envs(num_env_per_proc, num_proc, num_steps, max_tour_demand, reward_mode, initializer, vectorize_state):
     def make_env():
         def fn():
-            env = VRPEnvBase(
-                max_num_steps=num_steps,
-                max_tour_demand=max_tour_demand,
-                reward_mode=reward_mode,
-                initializer=initializer
-            )
-            return env
+            envs = [
+                VRPEnvBase(
+                    max_num_steps=num_steps,
+                    max_tour_demand=max_tour_demand,
+                    reward_mode=reward_mode,
+                    initializer=initializer,
+                    vectorize_state=vectorize_state
+                )
+                for _ in range(num_env_per_proc)
+            ]
+            return envs
         return fn
-    return SubprocVecEnv([make_env() for i in range(num_env)])
+    return SubprocVecEnv([make_env() for i in range(num_proc)])
+
+
+def chunk_list(lst, n_chunks):
+    chunk_size = int(len(lst) / n_chunks)
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+
+def unchunk_list(lst_of_chunks):
+    lst = []
+    for chunk in lst_of_chunks:
+        lst.extend(chunk)
+    return lst
 
 
 class SubprocVecEnv:
@@ -1486,15 +1568,15 @@ class SubprocVecEnv:
             raise Exception
         self.waiting = True
 
-        for remote, action in zip(self.remotes, actions):
-            remote.send(('step', (action)))
+        for remote, _actions in zip(self.remotes, chunk_list(actions, self.no_of_envs)):
+            remote.send(('step', (_actions)))
 
     def step_wait(self):
         if not self.waiting:
             raise Exception
         self.waiting = False
 
-        results = [remote.recv() for remote in self.remotes]
+        results = unchunk_list([remote.recv() for remote in self.remotes])
         obs, rews, dones = zip(*results)
         return obs, rews, dones
 
@@ -1507,10 +1589,13 @@ class SubprocVecEnv:
         instances, instance_ids, max_num_stepss
     ):
         # print(instance_ids)
-        for remote, instance, instance_id, max_num_steps in \
-                zip(self.remotes, instances, instance_ids, max_num_stepss):
-            remote.send(('set_instance_run', (instance, instance_id, max_num_steps)))
-        return [remote.recv() for remote in self.remotes]
+        instances_batched = chunk_list(instances, self.no_of_envs)
+        instance_ids_batched = chunk_list(instance_ids, self.no_of_envs)
+        max_num_steps_chunked = chunk_list(max_num_stepss, self.no_of_envs)
+        for remote, _instance, _instance_id, _max_num_steps in \
+                zip(self.remotes, instances_batched, instance_ids_batched, max_num_steps_chunked):
+            remote.send(('set_instance_run', (_instance, _instance_id, _max_num_steps)))
+        return unchunk_list([remote.recv() for remote in self.remotes])
     
     def reset_episode(
         self,
@@ -1522,27 +1607,30 @@ class SubprocVecEnv:
         """
         for remote in self.remotes:
             remote.send(('reset_episode', (None, )))
-        return [remote.recv() for remote in self.remotes]
+        return unchunk_list([remote.recv() for remote in self.remotes])
 
     def get_state(self):
         for remote in self.remotes:
             remote.send(('get_state', (None, )))
-        states = [remote.recv() for remote in self.remotes]
+        states = unchunk_list([remote.recv() for remote in self.remotes])
         return states
 
     def get_first_move_from_states(self):
-        pass
+        for remote in self.remotes:
+            remote.send(('get_first_move', (None, )))
+        first_moves = unchunk_list([remote.recv() for remote in self.remotes])
+        return first_moves
 
     def get_second_move_from_states(self, moves_0):
-        for remote, move_0 in zip(self.remotes, moves_0):
+        for remote, move_0 in zip(self.remotes, chunk_list(moves_0, self.no_of_envs)):
             remote.send(('get_second_move', move_0))
-        second_moves = [remote.recv() for remote in self.remotes]
+        second_moves = unchunk_list([remote.recv() for remote in self.remotes])
         return second_moves
 
     def get_instance(self):
         for remote in self.remotes:
             remote.send(('get_instance', (None,)))
-        states = [remote.recv() for remote in self.remotes]
+        states = unchunk_list([remote.recv() for remote in self.remotes])
         return states
 
     def close(self):
@@ -1570,7 +1658,8 @@ class VRPEnvBase(Env):
         max_num_steps=50,
         ret_best_state=True,
         max_tour_demand=10.,
-        initializer: VRPInitTour = VRPInitTour.SINGLETON
+        initializer: VRPInitTour = VRPInitTour.SINGLETON,
+        vectorize_state: bool = False
     ):
         super(VRPEnvBase, self).__init__()
         # config vars
@@ -1581,6 +1670,7 @@ class VRPEnvBase(Env):
         self.cur_instance = None
         self.reward_mode = reward_mode
         self.initializer = initializer
+        self.vectorize_state = vectorize_state
 
     def init(self):
         self.cur_step = -1
@@ -1611,12 +1701,12 @@ class VRPEnvBase(Env):
         b = instance
         state = self._make_state_from_batch_and_tour(b, init_tour, id)
         best_state = None
-        if best_tour is not None:
-            best_state = self._make_state_from_batch_and_tour(b, best_tour, id)
+        # if best_tour is not None:
+        #     best_state = self._make_state_from_batch_and_tour(b, best_tour, id)
         self._set_state(
             instance,
             state=state,
-            best_state=best_state,
+            best_state_tour=best_tour,
             max_num_steps=max_num_steps
         )
         return self.get_state()
@@ -1625,12 +1715,15 @@ class VRPEnvBase(Env):
         self,
         instance: Dict[str, Any],
         state: VRPState,
-        best_state: Optional[VRPState] = None,
+        best_state_tour: Optional[np.ndarray] = None,
         max_num_steps: Optional[int] = None
     ):
-        self.cur_instance = copy.deepcopy(instance)
-        self.state = copy.deepcopy(state)
-        self.best_state = copy.deepcopy(self.state) if best_state is None else best_state
+        self.cur_instance = instance # copy.deepcopy(instance)
+        self.state = state # copy.deepcopy(state)
+        self.best_state_tour = self.state.get_tours_adj(directed=False, sum=True) \
+            if best_state_tour is None else best_state_tour
+        self.cur_state_cost = self.state.get_cost(exclude_depot=False)
+        self.best_state_cost = self.cur_state_cost
         self.cur_step = 0
         self.done = False
         # option to reset the episode len
@@ -1639,16 +1732,35 @@ class VRPEnvBase(Env):
 
     def get_state(self):
         if self.ret_best_state:
+            if self.vectorize_state:
+                return model_input_from_states(
+                    [self.state],
+                    [self.best_state_tour],
+                    states_cost=np.array([self.cur_state_cost]),
+                    best_states_cost=np.array([self.best_state_cost]),
+                    states_opt_cost=np.array([self.state.opt_tour_dist]),
+                )
             return (self.state, self.best_state)
+        if self.vectorize_state:
+            return model_input_from_states(
+                [self.state],
+                None,
+                states_cost=np.array([self.cur_state_cost]),
+                best_states_cost=None,
+                states_opt_cost=np.array([self.state.opt_tour_dist]),
+            )
         return self.state
 
     def get_second_move(self, move_0):
         nbh = self.state.get_nbh()
         return nbh._get_second_move_nbh(self.state, move_0)
 
+    def get_first_move(self) -> VRPFirstMoves:
+        return self.state.get_nbh().first_moves
+
     def step(self, action: Dict):
         if self.done:
-            return self.state, 0, self.done
+            return self.get_state(), 0., self.done
 
         self.cur_step += 1
         if action['terminate']:
@@ -1657,25 +1769,31 @@ class VRPEnvBase(Env):
         if self.cur_step == self.max_num_steps:
             self.done = True
 
-        delta = self.best_state.get_cost(exclude_depot=False)
+        # delta = self.best_state.get_cost(exclude_depot=False)
+        delta = self.best_state_cost
+        self.cur_state_cost = self.state.get_cost(exclude_depot=False)
         if self.reward_mode == VRPReward.FINAL_COST:
             if self.done:
                 # if the action given in t-1 was terminate, or cur_step == T
                 # then the reward is cost(S[t-1])
-                reward = -self.best_state.get_cost(exclude_depot=False)
+                reward = -self.best_state_cost
             else:
                 move = action['move']
                 self.state.apply_move(move)
                 reward = 0.
-                if self.state.get_cost(exclude_depot=False) < self.best_state.get_cost(exclude_depot=False):
-                    self.best_state = copy.deepcopy(self.state)
+                if self.cur_state_cost < self.best_state_cost:
+                    # self.best_state = copy.deepcopy(self.state)
+                    self.best_state_tour = self.state.get_tours_adj(directed=False, sum=True)
+                    self.best_state_cost = self.cur_state_cost
         else:
             if not self.done:
                 move = action['move']
                 self.state.apply_move(move)
-                if self.state.get_cost(exclude_depot=False) < self.best_state.get_cost(exclude_depot=False):
-                    self.best_state = copy.deepcopy(self.state)
-            delta -= self.best_state.get_cost(exclude_depot=False)
+                if self.cur_state_cost < self.best_state_cost:
+                    # self.best_state = copy.deepcopy(self.state)
+                    self.best_state_tour = self.state.get_tours_adj(directed=False, sum=True)
+                    self.best_state_cost = self.cur_state_cost
+            delta -= self.best_state_cost
             reward = delta
 
         return self.get_state(), reward, self.done
@@ -1735,7 +1853,7 @@ class VRPEnvRandom(VRPEnvBase):
         self.set_instance_as_state(
             self.cur_instance,
             init_tour=self.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-            best_tour=self.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+            best_tour=self.best_state_tour, # self.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
             id=self.state.id,
             ret_opt_tour=self.ret_opt_tour
         )
@@ -1765,6 +1883,74 @@ class VRPEnvRandom(VRPEnvBase):
         return [self.get_second_move(move_0[0])]
 
 
+@dataclass
+class VectorizedState:
+    # x_edges: np.ndarray
+    x_edges_values: np.ndarray
+    x_nodes_coord: np.ndarray
+    x_tour: np.ndarray
+    x_best_tour: Optional[np.ndarray]
+    state_ids: np.ndarray
+    states_cost: np.ndarray
+    best_states_cost: Optional[np.ndarray]
+    states_opt_cost: np.ndarray
+
+def model_input_from_states(
+    states: List[VRPState],
+    # best_states: Optional[List[VRPState]]
+    best_states_tour: Optional[List[np.ndarray]],
+    states_cost: np.ndarray,
+    best_states_cost: Optional[np.ndarray],
+    states_opt_cost: np.ndarray,
+) -> VectorizedState:
+    if best_states_tour is None:
+        best_states = [None] * len(states)
+        best_states_cost = np.zeros(shape=len(best_states))
+    # x_edges = []
+    x_edges_values = []
+    x_nodes_coord = []
+    x_tour = []
+    x_best_tour = []
+    state_ids = []
+    for state, best_state_tour in zip(states, best_states_tour):
+        x_tour.append(
+            # torch.Tensor(
+            #     state.get_tours_adj(directed=False, sum=True)
+            # ).unsqueeze(0).to(torch.long)
+            torch.Tensor(state.get_tours_adj()).unsqueeze(0).to(torch.long)
+        )
+        if best_state_tour is not None:
+            x_best_tour.append(
+                torch.Tensor(
+                    # best_state.get_tours_adj(directed=False, sum=True)
+                    best_state_tour
+                ).unsqueeze(0).to(torch.long)
+            )
+        # x_edges.append(torch.ones_like(x_tour[-1]))
+        x_edges_values.append(torch.Tensor(state.edge_weights).unsqueeze(0))
+
+        # add batch dimension and feature dimension
+        node_demands = state.get_node_demands(include_depot=True)[None, :, None]
+        node_coords = state.nodes_coord[None, :]
+
+        x_nodes_coord.append(
+            torch.as_tensor(np.concatenate((node_coords, node_demands), axis=2)).to(torch.float)
+        )
+        state_ids.append(state.id)
+
+    return VectorizedState(
+        # torch.cat(x_edges, dim=0).numpy(),
+        torch.cat(x_edges_values, dim=0).numpy(),
+        torch.cat(x_nodes_coord, dim=0).numpy(),
+        torch.cat(x_tour, dim=0).numpy(),
+        torch.cat(x_best_tour, dim=0).numpy() if best_states_tour is not None else None,
+        torch.as_tensor(state_ids, dtype=int).numpy(),
+        states_cost=states_cost,
+        best_states_cost=best_states_cost,
+        states_opt_cost=states_opt_cost
+    )
+
+
 class VRPMultiEnvSingleProcAbstract:
     def __init__(
         self,
@@ -1776,7 +1962,8 @@ class VRPMultiEnvSingleProcAbstract:
         num_samples_per_instance=1,
         num_instance_per_batch=1,
         seed=42,
-        initializer=VRPInitTour.SINGLETON
+        initializer=VRPInitTour.SINGLETON,
+        vectorize_state: bool = False
     ):
         self.num_envs = num_samples_per_instance * num_instance_per_batch
         self.max_num_steps = max_num_steps
@@ -1786,7 +1973,8 @@ class VRPMultiEnvSingleProcAbstract:
                 max_num_steps=max_num_steps,
                 max_tour_demand=max_tour_demand,
                 reward_mode=reward_mode,
-                initializer=initializer
+                initializer=initializer,
+                vectorize_state=vectorize_state
             ) for _ in range(self.num_envs)
         ]
 
@@ -1833,7 +2021,6 @@ class VRPMultiEnvSingleProcAbstract:
                 max_num_steps=max_num_steps
             )
             states.append(_state)
-        return states
 
     def reset_episode(self):
         for cur_instance_id, env in zip(self.cur_instance_ids, self.envs):
@@ -1841,7 +2028,7 @@ class VRPMultiEnvSingleProcAbstract:
             env.set_instance_as_state(
                 instance=env.cur_instance,
                 init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-                best_tour=env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                best_tour=env.best_state_tour, # env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
                 id=cur_instance_id,
                 max_num_steps=env.max_num_steps  # same run, inherit from last episode
             )
@@ -1862,6 +2049,12 @@ class VRPMultiEnvSingleProcAbstract:
     def get_instance(self):
         return [env.get_instance() for env in self.envs]
 
+    def get_first_moves(self):
+        return [env.get_first_move() for env in self.envs]
+
+    def get_second_moves(self, moves_0):
+        return [env.get_second_move(move_0) for env, move_0 in zip(self.envs, moves_0)]
+
 
 class VRPMultiEnvAbstract(Env):
     def __init__(
@@ -1874,17 +2067,20 @@ class VRPMultiEnvAbstract(Env):
         num_samples_per_instance=1,
         num_instance_per_batch=1,
         seed=42,
-        initializer=VRPInitTour.SINGLETON
+        initializer=VRPInitTour.SINGLETON,
+        vectorize_state: bool = False,
     ):
         self.num_envs = num_samples_per_instance * num_instance_per_batch
         self.max_num_steps = max_num_steps
         self.max_tour_demand = max_tour_demand
         self.envs = make_mp_envs(
-            num_env=self.num_envs,
+            num_env_per_proc=4 ,# self.num_envs,
+            num_proc=3,
             num_steps=max_num_steps,
             max_tour_demand=max_tour_demand,
             reward_mode=reward_mode,
-            initializer=initializer
+            initializer=initializer,
+            vectorize_state=vectorize_state
         )
 
         self.num_nodes = num_nodes
@@ -1944,6 +2140,9 @@ class VRPMultiEnvAbstract(Env):
 
     def get_second_moves(self, moves_0):
         return self.envs.get_second_move_from_states(moves_0)
+    
+    def get_first_moves(self):
+        return self.envs.get_first_move_from_states()
 
 
 class VRPMultiRandomEnv(VRPMultiEnvAbstract):
@@ -2382,5 +2581,4 @@ if __name__=="__main__":
         fig, ax = plt.subplots(figsize=(4, 4))
         plot_vehicle_routes(data, [t[1:] for t in state.all_tours_as_list(remove_last_depot=True)], ax1=ax)
         plt.show()
-
 
