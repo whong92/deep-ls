@@ -1433,7 +1433,7 @@ def worker(remote, parent_remote, env_fn, env_idx):
             remote.send(env.set_instance_as_state(
                 instance=env.cur_instance,
                 init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-                best_tour=env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                best_tour=env.best_state_tour, # env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
                 id=cur_instance_id,
                 max_num_steps=max_num_steps
             ))
@@ -1489,14 +1489,15 @@ class CloudpickleWrapper(object):
         return self.x()
 
 
-def make_mp_envs(num_env, num_steps, max_tour_demand, reward_mode, initializer):
+def make_mp_envs(num_env, num_steps, max_tour_demand, reward_mode, initializer, vectorize_state):
     def make_env():
         def fn():
             env = VRPEnvBase(
                 max_num_steps=num_steps,
                 max_tour_demand=max_tour_demand,
                 reward_mode=reward_mode,
-                initializer=initializer
+                initializer=initializer,
+                vectorize_state=vectorize_state
             )
             return env
         return fn
@@ -1616,7 +1617,8 @@ class VRPEnvBase(Env):
         max_num_steps=50,
         ret_best_state=True,
         max_tour_demand=10.,
-        initializer: VRPInitTour = VRPInitTour.SINGLETON
+        initializer: VRPInitTour = VRPInitTour.SINGLETON,
+        vectorize_state: bool = False
     ):
         super(VRPEnvBase, self).__init__()
         # config vars
@@ -1627,6 +1629,7 @@ class VRPEnvBase(Env):
         self.cur_instance = None
         self.reward_mode = reward_mode
         self.initializer = initializer
+        self.vectorize_state = vectorize_state
 
     def init(self):
         self.cur_step = -1
@@ -1657,12 +1660,12 @@ class VRPEnvBase(Env):
         b = instance
         state = self._make_state_from_batch_and_tour(b, init_tour, id)
         best_state = None
-        if best_tour is not None:
-            best_state = self._make_state_from_batch_and_tour(b, best_tour, id)
+        # if best_tour is not None:
+        #     best_state = self._make_state_from_batch_and_tour(b, best_tour, id)
         self._set_state(
             instance,
             state=state,
-            best_state=best_state,
+            best_state_tour=best_tour,
             max_num_steps=max_num_steps
         )
         return self.get_state()
@@ -1671,12 +1674,15 @@ class VRPEnvBase(Env):
         self,
         instance: Dict[str, Any],
         state: VRPState,
-        best_state: Optional[VRPState] = None,
+        best_state_tour: Optional[np.ndarray] = None,
         max_num_steps: Optional[int] = None
     ):
-        self.cur_instance = copy.deepcopy(instance)
-        self.state = copy.deepcopy(state)
-        self.best_state = copy.deepcopy(self.state) if best_state is None else best_state
+        self.cur_instance = instance # copy.deepcopy(instance)
+        self.state = state # copy.deepcopy(state)
+        self.best_state_tour = self.state.get_tours_adj(directed=False, sum=True) \
+            if best_state_tour is None else best_state_tour
+        self.cur_state_cost = self.state.get_cost(exclude_depot=False)
+        self.best_state_cost = self.cur_state_cost
         self.cur_step = 0
         self.done = False
         # option to reset the episode len
@@ -1685,7 +1691,22 @@ class VRPEnvBase(Env):
 
     def get_state(self):
         if self.ret_best_state:
-            return (self.state, self.best_state)
+            if self.vectorize_state:
+                return model_input_from_states(
+                    [self.state],
+                    [self.best_state_tour],
+                    states_cost=np.array([self.cur_state_cost]),
+                    best_states_cost=np.array([self.best_state_cost]),
+                    states_opt_cost=np.array([self.state.opt_tour_dist]),
+                )
+        if self.vectorize_state:
+            return model_input_from_states(
+                [self.state],
+                None,
+                states_cost=np.array([self.cur_state_cost]),
+                best_states_cost=None,
+                states_opt_cost=np.array([self.state.opt_tour_dist]),
+            )
         return self.state
 
     def get_second_move(self, move_0):
@@ -1703,25 +1724,31 @@ class VRPEnvBase(Env):
         if self.cur_step == self.max_num_steps:
             self.done = True
 
-        delta = self.best_state.get_cost(exclude_depot=False)
+        # delta = self.best_state.get_cost(exclude_depot=False)
+        delta = self.best_state_cost
+        self.cur_state_cost = self.state.get_cost(exclude_depot=False)
         if self.reward_mode == VRPReward.FINAL_COST:
             if self.done:
                 # if the action given in t-1 was terminate, or cur_step == T
                 # then the reward is cost(S[t-1])
-                reward = -self.best_state.get_cost(exclude_depot=False)
+                reward = -self.best_state_cost
             else:
                 move = action['move']
                 self.state.apply_move(move)
                 reward = 0.
-                if self.state.get_cost(exclude_depot=False) < self.best_state.get_cost(exclude_depot=False):
-                    self.best_state = copy.deepcopy(self.state)
+                if self.cur_state_cost < self.best_state_cost:
+                    # self.best_state = copy.deepcopy(self.state)
+                    self.best_state_tour = self.state.get_tours_adj(directed=False, sum=True)
+                    self.best_state_cost = self.cur_state_cost
         else:
             if not self.done:
                 move = action['move']
                 self.state.apply_move(move)
-                if self.state.get_cost(exclude_depot=False) < self.best_state.get_cost(exclude_depot=False):
-                    self.best_state = copy.deepcopy(self.state)
-            delta -= self.best_state.get_cost(exclude_depot=False)
+                if self.cur_state_cost < self.best_state_cost:
+                    # self.best_state = copy.deepcopy(self.state)
+                    self.best_state_tour = self.state.get_tours_adj(directed=False, sum=True)
+                    self.best_state_cost = self.cur_state_cost
+            delta -= self.best_state_cost
             reward = delta
 
         return self.get_state(), reward, self.done
@@ -1784,7 +1811,7 @@ class VRPEnvRandom(VRPEnvBase):
         self.set_instance_as_state(
             self.cur_instance,
             init_tour=self.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-            best_tour=self.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+            best_tour=self.best_state_tour, # self.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
             id=self.state.id,
             ret_opt_tour=self.ret_opt_tour
         )
@@ -1814,6 +1841,76 @@ class VRPEnvRandom(VRPEnvBase):
         return [self.get_second_move(move_0[0])]
 
 
+@dataclass
+class VectorizedState:
+    # x_edges: np.ndarray
+    x_edges_values: np.ndarray
+    x_nodes_coord: np.ndarray
+    x_tour: np.ndarray
+    x_best_tour: Optional[np.ndarray]
+    state_ids: np.ndarray
+    states_cost: np.ndarray
+    best_states_cost: Optional[np.ndarray]
+    states_opt_cost: np.ndarray
+
+
+def model_input_from_states(
+    states: List[VRPState],
+    # best_states: Optional[List[VRPState]]
+    best_states_tour: Optional[List[np.ndarray]],
+    states_cost: np.ndarray,
+    best_states_cost: Optional[np.ndarray],
+    states_opt_cost: np.ndarray,
+) -> VectorizedState:
+    if best_states_tour is None:
+        best_states = [None] * len(states)
+        best_states_cost = np.zeros(shape=len(best_states))
+    # x_edges = []
+    x_edges_values = []
+    x_nodes_coord = []
+    x_tour = []
+    x_best_tour = []
+    state_ids = []
+    for state, best_state_tour in zip(states, best_states_tour):
+        x_tour.append(
+            # torch.Tensor(
+            #     state.get_tours_adj(directed=False, sum=True)
+            # ).unsqueeze(0).to(torch.long)
+            torch.Tensor(state.get_tours_adj()).unsqueeze(0).to(torch.long)
+        )
+        if best_state_tour is not None:
+            x_best_tour.append(
+                torch.Tensor(
+                    # best_state.get_tours_adj(directed=False, sum=True)
+                    best_state_tour
+                ).unsqueeze(0).to(torch.long)
+            )
+        # x_edges.append(torch.ones_like(x_tour[-1]))
+        x_edges_values.append(torch.Tensor(state.edge_weights).unsqueeze(0))
+
+        # add batch dimension and feature dimension
+        node_demands = state.get_node_demands(include_depot=True)[None, :, None]
+        node_coords = state.nodes_coord[None, :]
+
+        x_nodes_coord.append(
+            torch.as_tensor(np.concatenate((node_coords, node_demands), axis=2)).to(torch.float)
+        )
+        state_ids.append(state.id)
+
+    return VectorizedState(
+        # torch.cat(x_edges, dim=0).numpy(),
+        torch.cat(x_edges_values, dim=0).numpy(),
+        torch.cat(x_nodes_coord, dim=0).numpy(),
+        torch.cat(x_tour, dim=0).numpy(),
+        torch.cat(x_best_tour, dim=0).numpy() if best_states_tour is not None else None,
+        torch.as_tensor(state_ids, dtype=int).numpy(),
+        states_cost=states_cost,
+        best_states_cost=best_states_cost,
+        states_opt_cost=states_opt_cost
+    )
+
+
+
 class VRPMultiEnvSingleProcAbstract:
     def __init__(
         self,
@@ -1825,7 +1922,8 @@ class VRPMultiEnvSingleProcAbstract:
         num_samples_per_instance=1,
         num_instance_per_batch=1,
         seed=42,
-        initializer=VRPInitTour.SINGLETON
+        initializer=VRPInitTour.SINGLETON,
+        vectorize_state: bool = False
     ):
         self.num_envs = num_samples_per_instance * num_instance_per_batch
         self.max_num_steps = max_num_steps
@@ -1835,7 +1933,8 @@ class VRPMultiEnvSingleProcAbstract:
                 max_num_steps=max_num_steps,
                 max_tour_demand=max_tour_demand,
                 reward_mode=reward_mode,
-                initializer=initializer
+                initializer=initializer,
+                vectorize_state=vectorize_state
             ) for _ in range(self.num_envs)
         ]
 
@@ -1872,7 +1971,7 @@ class VRPMultiEnvSingleProcAbstract:
 
         max_num_steps = max_num_steps if max_num_steps else self.max_num_steps
         assert len(self.cur_instances) == len(self.envs)
-        states = []
+        # states = []
         for env, cur_instance, cur_instance_id in zip(self.envs, self.cur_instances, self.cur_instance_ids):
             _state = env.set_instance_as_state(
                 instance=cur_instance,
@@ -1881,8 +1980,8 @@ class VRPMultiEnvSingleProcAbstract:
                 id=cur_instance_id,
                 max_num_steps=max_num_steps
             )
-            states.append(_state)
-        return states
+            # states.append(_state)
+        # return states
 
     def reset_episode(self):
         for cur_instance_id, env in zip(self.cur_instance_ids, self.envs):
@@ -1890,7 +1989,7 @@ class VRPMultiEnvSingleProcAbstract:
             env.set_instance_as_state(
                 instance=env.cur_instance,
                 init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-                best_tour=env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                best_tour=env.best_state_tour, # env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
                 id=cur_instance_id,
                 max_num_steps=env.max_num_steps  # same run, inherit from last episode
             )
@@ -1929,7 +2028,8 @@ class VRPMultiEnvAbstract(Env):
         num_samples_per_instance=1,
         num_instance_per_batch=1,
         seed=42,
-        initializer=VRPInitTour.SINGLETON
+        initializer=VRPInitTour.SINGLETON,
+        vectorize_state: bool = False,
     ):
         self.num_envs = num_samples_per_instance * num_instance_per_batch
         self.max_num_steps = max_num_steps
@@ -1939,7 +2039,8 @@ class VRPMultiEnvAbstract(Env):
             num_steps=max_num_steps,
             max_tour_demand=max_tour_demand,
             reward_mode=reward_mode,
-            initializer=initializer
+            initializer=initializer,
+            vectorize_state=vectorize_state
         )
 
         self.num_nodes = num_nodes
