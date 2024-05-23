@@ -14,7 +14,7 @@ from deepls.VRPState import (
     vectorize_reloc_moves, vectorize_cross_moves, vectorize_twopt_moves,
     normalize_vectorized_reloc_moves, normalize_vectorized_cross_moves, normalize_vectorized_twoopt_moves,
     normalize_edges,
-    VRPMultiEnvAbstract
+    VRPMultiEnvAbstract, model_input_from_states
 )
 from typing import List, Optional, Dict, Any, Tuple
 from torch.distributions import categorical as tdc
@@ -22,8 +22,8 @@ from multiprocessing import pool
 
 from torch.optim import Adam
 import numpy as np
-from deepls.agent import AverageStateRewardBaselineAgent, GRCNCriticBaselineAgent
-
+from deepls.agent import GRCNCriticBaselineAgent
+from deepls.VRPState import normalize_edges, VectorizedState
 
 class VRPValueNet(nn.Module):
     def __init__(self, config, device):
@@ -334,12 +334,12 @@ class VRPActionNet(nn.Module):
 
     def forward_autoreg(
         self,
-        x_edges,
+        # x_edges,
         x_edges_values,
         x_nodes_coord,
         x_tour,
         x_best_tour,
-        states: List[VRPState],
+        # states: List[VRPState],
         envs: VRPMultiEnvAbstract
     ):
         x_cat = torch.stack([x_tour, x_best_tour], dim=3)
@@ -434,19 +434,19 @@ class VRPActionNet(nn.Module):
 
     def forward(
         self,
-        x_edges,
+        # x_edges,
         x_edges_values,
         x_nodes_coord,
         x_tour,
         x_best_tour,
-        states: List[VRPState],
+        # states: List[VRPState],
         env
     ):
-        return self.forward_autoreg(x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, states, env)
+        return self.forward_autoreg(x_edges_values, x_nodes_coord, x_tour, x_best_tour, env)
 
     def get_action_pref_autoreg(
         self,
-        x_edges,
+        # x_edges,
         x_edges_values,
         x_nodes_coord,
         x_tour,
@@ -539,7 +539,7 @@ class VRPActionNet(nn.Module):
 
     def get_action_pref(
         self,
-        x_edges,
+        # x_edges,
         x_edges_values,
         x_nodes_coord,
         x_tour,
@@ -549,7 +549,7 @@ class VRPActionNet(nn.Module):
         nbhs: List[VRPNbHAutoReg]
     ):
         return self.get_action_pref_autoreg(
-            x_edges,
+            # x_edges,
             x_edges_values,
             x_nodes_coord,
             x_tour,
@@ -559,42 +559,18 @@ class VRPActionNet(nn.Module):
             nbhs
         )
 
-def model_input_from_states(states: List[VRPState], best_states: List[VRPState]):
-    x_edges = []
-    x_edges_values = []
-    x_nodes_coord = []
-    x_tour = []
-    x_best_tour = []
-    states_input = []
-    for state, best_state in zip(states, best_states):
-        x_tour.append(
-            torch.Tensor(
-                state.get_tours_adj(directed=False, sum=True)
-            ).unsqueeze(0).to(torch.long)
-        )
-        x_best_tour.append(
-            torch.Tensor(
-                best_state.get_tours_adj(directed=False, sum=True)
-            ).unsqueeze(0).to(torch.long)
-        )
-        x_edges.append(torch.ones_like(x_tour[-1]))
-        x_edges_values.append(torch.Tensor(state.edge_weights).unsqueeze(0))
-
-        # add batch dimension and feature dimension
-        node_demands = state.get_node_demands(include_depot=True)[None, :, None]
-        node_coords = state.nodes_coord[None, :]
-
-        x_nodes_coord.append(
-            torch.as_tensor(np.concatenate((node_coords, node_demands), axis=2)).to(torch.float)
-        )
-        states_input.append(state)
-    return (
-        torch.cat(x_edges, dim=0),
-        torch.cat(x_edges_values, dim=0),
-        torch.cat(x_nodes_coord, dim=0),
-        torch.cat(x_tour, dim=0),
-        torch.cat(x_best_tour, dim=0),
-        states_input
+def concat_states(vectorized_states: List[VectorizedState]):
+    vs = vectorized_states
+    return VectorizedState(
+        x_tour=np.concatenate([s.x_tour for s in vs], axis=0),
+        x_best_tour=np.concatenate([s.x_best_tour for s in vs], axis=0),
+        x_nodes_coord=np.concatenate([s.x_nodes_coord for s in vs], axis=0),
+        # x_edges=np.concatenate([s.x_edges for s in vs], axis=0),
+        x_edges_values=np.concatenate([s.x_edges_values for s in vs], axis=0),
+        state_ids=np.concatenate([s.state_ids for s in vs], axis=0),
+        states_cost=np.concatenate([s.states_cost for s in vs], axis=0),
+        best_states_cost=np.concatenate([s.best_states_cost for s in vs], axis=0),
+        states_opt_cost=np.concatenate([s.states_opt_cost for s in vs], axis=0),
     )
 
 
@@ -606,7 +582,7 @@ class ActionNetRunner:
         self.net = net
         self.device = device
 
-    def policy(self, states: List[Tuple[VRPState, VRPState]], env):
+    def policy(self, vectorized_states: List[VectorizedState], env):
         """
         :param states: sequence of tuple of 2 TSP2OptEnv states - the current state and the best state so far
         :return:
@@ -614,22 +590,35 @@ class ActionNetRunner:
             cache - stuff that the policy net expects to be cached (to avoid re-computation), and returned to it in
             the list of experiences which is given in e.g. get_action_pref method
         """
-        best_states = [state[1] for state in states]
-        states: List[VRPState] = [state[0] for state in states]
-        # cur state
-        x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, states_input = \
-            list(model_input_from_states(states, best_states))
+        # best_states = [state[1] for state in states]
+        # states: List[VRPState] = [state[0] for state in states]
+        # # cur state
+        # x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour, states_input = \
+        #     list(model_input_from_states(states, best_states))
 
-        model_input = [x_edges, x_edges_values, x_nodes_coord, x_tour, x_best_tour]
+        # B = len(vectorized_states)
+        vectorized_state = concat_states(vectorized_states)
+
+        model_input = [
+            # torch.as_tensor(np.ones_like(vectorized_state.x_edges_values)),
+            torch.as_tensor(vectorized_state.x_edges_values),
+            torch.as_tensor(vectorized_state.x_nodes_coord),
+            torch.as_tensor(vectorized_state.x_tour),
+            torch.as_tensor(vectorized_state.x_best_tour)
+        ]
         with torch.no_grad():
-            moves, pis, action_idxs, nbhs = self.net(*[t.clone().to(self.device) for t in model_input] + [states_input], env)
+            # moves, pis, action_idxs, nbhs = self.net(*[t.clone().to(self.device) for t in model_input] + [states_input], env)
+            moves, pis, action_idxs, nbhs = self.net(*[t.clone().to(self.device) for t in model_input],
+                                                     env)
+
         cache = {
             'model_input': model_input,
             'action': action_idxs.detach().to('cpu'),
             'action_pref': pis.detach().to('cpu'),
-            'tour_len': [state.get_cost() for state in states],
+            # 'tour_len': [state.get_cost() for state in states],
             'moves': moves,
-            'state_ids': [state.id for state in states],
+            # 'state_ids': [state.id for state in states],
+            'state_ids': vectorized_state.state_ids,  # [state.id for state in states],
             'nbhs': nbhs  # maybe construct the nbh in agent so agent owns it?
         }
         actions = [{'move': move, 'terminate': False} for move in moves]
@@ -721,7 +710,7 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
         self.rewards = []
 
         self.last_state = state
-        self.state_ids.append([s[0].id for s in self.last_state])
+        self.state_ids.append([s.state_ids[0] for s in self.last_state])
         self.last_action, self.last_cache = self.policy(self.last_state, env)
         self.actions.append(self.last_action)
         self.caches.append(self.last_cache)
@@ -749,7 +738,8 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
         self.last_action = action
         self.last_cache = cache
 
-        self.state_ids.append([s[0].id for s in self.last_state])
+        # self.state_ids.append([s[0].id for s in self.last_state])
+        self.state_ids.append([s.state_ids[0] for s in self.last_state])
         self.actions.append(self.last_action)
         self.caches.append(self.last_cache)
 
@@ -786,7 +776,8 @@ class AverageStateRewardBaselineAgentVRP(BaseAgent):
             # Append new experience to replay buffer
             self.replay_buffer.append(
                 self.episode,
-                [s[0].id for s in self.last_state],
+                # [s[0].id for s in self.last_state],
+                self.state_ids.append([s.state_ids[0] for s in self.last_state]),
                 self.last_action,
                 reward,
                 True,
