@@ -1368,6 +1368,7 @@ def worker(remote, parent_remote, env_fn, env_idx):
                 instance=env.cur_instance,
                 init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
                 best_tour=env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                best_tour_alt=env.best_state_tour,
                 id=cur_instance_id,
                 max_num_steps=max_num_steps
             ))
@@ -1584,6 +1585,7 @@ class VRPEnvBase(Env):
         instance,
         init_tour=None,
         best_tour=None,
+        best_tour_alt=None,
         id: Optional[int] = None,
         max_num_steps: Optional[int] = None,
         ret_opt_tour: bool = False
@@ -1597,6 +1599,7 @@ class VRPEnvBase(Env):
             instance,
             state=state,
             best_state=best_state,
+            best_state_tour=best_tour_alt,
             max_num_steps=max_num_steps
         )
         return self.get_state()
@@ -1606,11 +1609,18 @@ class VRPEnvBase(Env):
         instance: Dict[str, Any],
         state: VRPState,
         best_state: Optional[VRPState] = None,
+        best_state_tour: Optional[np.ndarray] = None,
         max_num_steps: Optional[int] = None
     ):
-        self.cur_instance = copy.deepcopy(instance)
-        self.state = copy.deepcopy(state)
+        self.cur_instance = instance
+        self.state = state
         self.best_state = copy.deepcopy(self.state) if best_state is None else best_state
+        ######
+        self.best_state_tour = self.state.get_tours_adj(directed=False, sum=True) \
+            if best_state_tour is None else best_state_tour
+        self.cur_state_cost = self.state.get_cost(exclude_depot=False)
+        self.best_state_cost = self.cur_state_cost
+        ######
         self.cur_step = 0
         self.done = False
         # option to reset the episode len
@@ -1626,6 +1636,13 @@ class VRPEnvBase(Env):
         nbh = self.state.get_nbh()
         return nbh._get_second_move_nbh(self.state, move_0)
 
+    def _update_best_state(self):
+        self.cur_state_cost = self.state.get_cost(exclude_depot=False)
+        if self.cur_state_cost < self.best_state_cost:
+            self.best_state_tour = self.state.get_tours_adj(directed=False, sum=True)
+            self.best_state_cost = self.cur_state_cost
+            self.best_state = copy.deepcopy(self.state)
+
     def step(self, action: Dict):
         if self.done:
             return self.state, 0, self.done
@@ -1637,26 +1654,25 @@ class VRPEnvBase(Env):
         if self.cur_step == self.max_num_steps:
             self.done = True
 
-        delta = self.best_state.get_cost(exclude_depot=False)
+        delta = self.best_state_cost
+        self.cur_state_cost = self.state.get_cost(exclude_depot=False)
         if self.reward_mode == VRPReward.FINAL_COST:
             if self.done:
                 # if the action given in t-1 was terminate, or cur_step == T
                 # then the reward is cost(S[t-1])
-                reward = -self.best_state.get_cost(exclude_depot=False)
+                reward = -self.best_state_cost
             else:
                 move = action['move']
                 self.state.apply_move(move)
                 reward = 0.
-                if self.state.get_cost(exclude_depot=False) < self.best_state.get_cost(exclude_depot=False):
-                    self.best_state = copy.deepcopy(self.state)
         else:
             if not self.done:
                 move = action['move']
                 self.state.apply_move(move)
-                if self.state.get_cost(exclude_depot=False) < self.best_state.get_cost(exclude_depot=False):
-                    self.best_state = copy.deepcopy(self.state)
-            delta -= self.best_state.get_cost(exclude_depot=False)
+            delta -= self.best_state_cost
             reward = delta
+
+        self._update_best_state()
 
         return self.get_state(), reward, self.done
 
@@ -1719,6 +1735,7 @@ class VRPEnvRandom(VRPEnvBase):
             self.cur_instance,
             init_tour=self.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
             best_tour=self.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+            best_tour_alt=self.best_state_tour,
             id=self.state.id,
             ret_opt_tour=self.ret_opt_tour
         )
