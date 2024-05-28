@@ -160,7 +160,8 @@ def run_experiment(
         num_samples_per_instance=num_samples_per_instance,
         num_instance_per_batch=num_instance_per_batch,
         reward_mode=reward_mode,
-        initializer=initializer
+        initializer=initializer,
+        vectorize_state=True
     )
     env.reset()
 
@@ -220,7 +221,8 @@ def run_experiment(
                             ve_error.append(torch.mean(agent.critic_abs_err).detach())
                         else:
                             ve_error.append(-1)
-                        train_opt_gaps = np.array([(state[1].get_cost() / state[0].opt_tour_dist) - 1. for state in states])
+                        opt_cost = states[0].states_opt_cost[0]
+                        train_opt_gaps = np.array([state.best_states_cost[0] / opt_cost - 1. for state in states])
                         train_opt_gap = np.mean(train_opt_gaps)
                         train_opt_gap_std = np.std(train_opt_gaps)
                         wandb_module.log({'opt_gap_mean': train_opt_gap, 'opt_gap_std': train_opt_gap_std})
