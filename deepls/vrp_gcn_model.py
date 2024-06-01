@@ -105,7 +105,6 @@ class VRPActionNet(nn.Module):
         self,
         x_emb,
         e_emb,
-        # edges_vect_all, nodes_vect_all, first_move_nbhs
         edges_moves_vect,
         nodes_moves_vect,
     ):
@@ -141,7 +140,62 @@ class VRPActionNet(nn.Module):
         xe_emb_logits_padded = pad_sequence(xe_emb_logits, batch_first=True, padding_value=-float("inf"))
         xe_emb_logits_padded = xe_emb_logits_padded.squeeze(-1)
 
-        return xe_emb_logits_padded # , first_move_nbhs
+        return xe_emb_logits_padded
+
+    def _get_first_move_from_action_idx(self, edges_moves_vect, nodes_moves_vect, action_idxs):
+        moves_0 = []
+        for batch, action_idx in enumerate(action_idxs):
+            edges_moves = edges_moves_vect[batch]
+            nodes_moves = nodes_moves_vect[batch]
+            n_node_moves = len(nodes_moves['nodes'])
+            if action_idx < n_node_moves:
+                moves_0.append({
+                    'type': 'node',
+                    'node': nodes_moves['nodes'][action_idx],
+                    'tour_idx': nodes_moves['tour_idx'][action_idx]
+                })
+            else:
+                moves_0.append({
+                    'type': 'edge',
+                    'edge': edges_moves['edge'][action_idx - n_node_moves],
+                    'tour_idx': edges_moves['tour_idx'][action_idx - n_node_moves]
+                })
+        return moves_0
+
+    def _get_second_move_from_action_idx(self, reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, action_idxs):
+        moves_1 = []
+        for batch, action_idx in enumerate(action_idxs):
+            _reloc_nbh_vect = reloc_nbh_vects[batch]
+            _cross_nbh_vect = cross_nbh_vects[batch]
+            _two_opt_nbh_vect = two_opt_nbh_vects[batch]
+            n_reloc_moves = len(_reloc_nbh_vect['src_node'])
+            n_cross_moves = len(_cross_nbh_vect['e0'])
+            # print(n_reloc_moves, n_cross_moves, len(_two_opt_nbh_vect['e0']), action_idx)
+            if action_idx < n_reloc_moves:
+                move_1 = {'nb_type': 'reloc'}
+                keys = ["tour0", "tour1", "src_node", "src_u", "src_v", "dst_w", "dst_wp", "src_up", "src_vp", "cost"]
+                for key in keys:
+                    move_1[key] = _reloc_nbh_vect[key][action_idx]
+                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
+                moves_1.append(move_1)
+            elif action_idx < (n_cross_moves + n_reloc_moves):
+                _action_idx = action_idx - n_reloc_moves
+                move_1 = {'nb_type': 'cross'}
+                keys = ["tour0", "tour1", "e0", "e1", "e0p", "e1p", "cost"]
+                for key in keys:
+                    move_1[key] = _cross_nbh_vect[key][_action_idx]
+                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
+                moves_1.append(move_1)
+            else:
+                _action_idx = action_idx - n_reloc_moves - n_cross_moves
+                move_1 = {'nb_type': '2opt'}
+                keys = ["tour_idx", "e0", "e1", "e0p", "e1p", "cost"]
+                for key in keys:
+                    move_1[key] = _two_opt_nbh_vect[key][_action_idx]
+                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
+                moves_1.append(move_1)
+
+        return moves_1
 
     @staticmethod
     def sample_moves_given_logits(
@@ -253,34 +307,12 @@ class VRPActionNet(nn.Module):
         reloc_nbh_vects = []
         cross_nbh_vects = []
         two_opt_nbh_vects = []
-        # second_move_list = []
-        selected_first_actions_k = []
         for nbh in nbhs:
             reloc_nbh_vects.append(nbh.second_moves.reloc_nbh_vect)
             cross_nbh_vects.append(nbh.second_moves.cross_nbh_vect)
             two_opt_nbh_vects.append(nbh.second_moves.twp_opt_nbh_vect)
-            # second_move_list.append(nbh.second_moves)
-            # return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list, selected_first_actions_k
         return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects
 
-    # @staticmethod
-    # def _make_second_moves_from_states(
-    #     states: List[VRPState],
-    #     nbhs: List[VRPNbHAutoReg],
-    #     moves_0: List
-    # ):
-    #     reloc_nbh_vects = []
-    #     cross_nbh_vects = []
-    #     two_opt_nbh_vects = []
-    #     second_move_list = []
-    #     for state, nbh, move_0 in zip(states, nbhs, moves_0):
-    #         nbh.reloc_nbh_vect, nbh.cross_nbh_vect, nbh.twp_opt_nbh_vect, nbh.second_moves = \
-    #             nbh._get_second_move_nbh(state, move_0)
-    #         reloc_nbh_vects.append(nbh.reloc_nbh_vect)
-    #         cross_nbh_vects.append(nbh.cross_nbh_vect)
-    #         two_opt_nbh_vects.append(nbh.twp_opt_nbh_vect)
-    #         second_move_list.append(nbh.second_moves)
-    #     return reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, second_move_list
 
     @staticmethod
     def _make_second_move_from_state(
@@ -358,30 +390,13 @@ class VRPActionNet(nn.Module):
             edges_moves_all, nodes_moves_all
         )
         actions_0, pi_0, _ = self.sample_moves_given_logits(first_move_logits, device=self.device, greedy=False)
-        moves_0 = []
-        for batch, action_idx in enumerate(actions_0):
-            edges_moves = edges_moves_all[batch]
-            nodes_moves = nodes_moves_all[batch]
-            n_node_moves = len(nodes_moves['nodes'])
-            if action_idx < n_node_moves:
-                moves_0.append({
-                    'type': 'node',
-                    'node': nodes_moves['nodes'][action_idx],
-                    'tour_idx': nodes_moves['tour_idx'][action_idx]
-                })
-            else:
-                moves_0.append({
-                    'type': 'edge',
-                    'edge': edges_moves['edge'][action_idx - n_node_moves],
-                    'tour_idx': edges_moves['tour_idx'][action_idx - n_node_moves]
-                })
-
+        moves_0 = self._get_first_move_from_action_idx(edges_moves_all, nodes_moves_all, actions_0)
         reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects = \
             self._make_second_moves_multiproc_env(moves_0, nbhs, envs)
 
         reloc_nbh_vects_normalized, cross_nbh_vects_normalized, two_opt_nbh_vects_normalized = [], [], []
         for _reloc_nbh_vects, _cross_nbh_vects, _two_opt_nbh_vects in zip(
-                reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects
+            reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects
         ):
             reloc_nbh_vects_normalized.append(normalize_vectorized_reloc_moves(_reloc_nbh_vects))
             cross_nbh_vects_normalized.append(normalize_vectorized_cross_moves(_cross_nbh_vects))
@@ -393,66 +408,30 @@ class VRPActionNet(nn.Module):
                                         two_opt_nbh_vects_normalized)
         actions_1, pi_1, _ = self.sample_moves_given_logits(second_moves_logits_padded,
                                                             device=self.device, greedy=False)
-        moves_1 = []
-        # print(reloc_nbh_vects)
-        for batch, action_idx in enumerate(actions_1):
-            _reloc_nbh_vect = reloc_nbh_vects[batch]
-            _cross_nbh_vect = cross_nbh_vects[batch]
-            _two_opt_nbh_vect = two_opt_nbh_vects[batch]
-            n_reloc_moves = len(_reloc_nbh_vect['src_node'])
-            n_cross_moves = len(_cross_nbh_vect['e0'])
-            # print(n_reloc_moves, n_cross_moves, len(_two_opt_nbh_vect['e0']), action_idx)
-            if action_idx < n_reloc_moves:
-                move_1 = {'nb_type': 'reloc'}
-                keys = ["tour0", "tour1", "src_node", "src_u", "src_v", "dst_w", "dst_wp", "src_up", "src_vp", "cost"]
-                for key in keys:
-                    move_1[key] = _reloc_nbh_vect[key][action_idx]
-                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
-                moves_1.append(move_1)
-            elif action_idx < (n_cross_moves + n_reloc_moves):
-                _action_idx = action_idx - n_reloc_moves
-                move_1 = {'nb_type': 'cross'}
-                keys = ["tour0", "tour1", "e0", "e1", "e0p", "e1p", "cost"]
-                for key in keys:
-                    move_1[key] = _cross_nbh_vect[key][_action_idx]
-                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
-                moves_1.append(move_1)
-            else:
-                _action_idx = action_idx - n_reloc_moves - n_cross_moves
-                move_1 = {'nb_type': '2opt'}
-                keys = ["tour_idx", "e0", "e1", "e0p", "e1p", "cost"]
-                for key in keys:
-                    move_1[key] = _two_opt_nbh_vect[key][_action_idx]
-                    if len(move_1[key]) == 1: move_1[key] = move_1[key][0]
-                moves_1.append(move_1)
-        # print(moves_1)
-        #
+        moves_1 = self._get_second_move_from_action_idx(reloc_nbh_vects, cross_nbh_vects, two_opt_nbh_vects, actions_1)
         actions = torch.stack([actions_0, actions_1], dim=1)
         pi = pi_0 + pi_1
         moves = moves_1
         return moves, pi, actions, nbhs
 
     def forward(
-            self,
-            # x_edges,
-            x_edges_values,
-            x_nodes_coord,
-            x_tour,
-            x_best_tour,
-            # states: List[VRPState],
-            env
+        self,
+        x_edges_values,
+        x_nodes_coord,
+        x_tour,
+        x_best_tour,
+        env
     ):
         return self.forward_autoreg(x_edges_values, x_nodes_coord, x_tour, x_best_tour, env)
 
     def get_action_pref_autoreg(
-            self,
-            # x_edges,
-            x_edges_values,
-            x_nodes_coord,
-            x_tour,
-            x_best_tour,
-            actions: torch.Tensor,
-            nbhs: List[VRPNbHAutoReg]
+        self,
+        x_edges_values,
+        x_nodes_coord,
+        x_tour,
+        x_best_tour,
+        actions: torch.Tensor,
+        nbhs: List[VRPNbHAutoReg]
     ):
         """
         """
@@ -494,14 +473,12 @@ class VRPActionNet(nn.Module):
 
     def get_action_pref(
             self,
-            # x_edges,
-            x_edges_values,
-            x_nodes_coord,
-            x_tour,
-            x_best_tour,
-            # states: List[VRPState],
-            actions: torch.Tensor,
-            nbhs: List[VRPNbHAutoReg]
+        x_edges_values,
+        x_nodes_coord,
+        x_tour,
+        x_best_tour,
+        actions: torch.Tensor,
+        nbhs: List[VRPNbHAutoReg]
     ):
         return self.get_action_pref_autoreg(
             # x_edges,
