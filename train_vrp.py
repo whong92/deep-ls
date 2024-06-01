@@ -297,7 +297,7 @@ if __name__ == "__main__":
             "num_edge_cat_features": 2
         },
         'optim': {
-            'step_size': 1e-5,
+            'step_size': 1e-4,
             'step_size_critic': 5e-4,
             'beta_m': 0.9,
             'beta_v': 0.999,

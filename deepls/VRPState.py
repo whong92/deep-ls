@@ -372,18 +372,6 @@ class VRPState:
             return np.concatenate((np.array([0.]), self.node_demands))
         return self.node_demands
 
-    @classmethod
-    def copy_construct(cls, other: 'VRPState'):
-        return VRPState(
-            other.nodes_coord,
-            other.node_demands,
-            other.max_tour_demand,
-            tours_init=other.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-            id=other.id,
-            opt_tour_dist=other.opt_tour_dist,
-            init_tour=other.init_tour
-        )
-
     def __init__(
         self,
         nodes_coord: np.ndarray,  # depot is always node 0,
@@ -801,24 +789,6 @@ def flatten_deduplicate_reloc_nbh(
                     "cost": cost
                 }
                 reloc_nbhs_dict[nbh_norm] = nb
-
-    # import random
-    # if random.uniform(0, 1.) < 0.05:
-    #     print(reloc_nbhs)
-    #     print(state.tours)
-    #     print(state.edge_weights)
-    #     import pickle
-    #     import uuid
-    #     with open(f"example_flatten_reloc_inputs/dummy_flatten_deduplicate_reloc_nbh_inputs_{uuid.uuid4()}.pkl",
-    #               "wb") as fp:
-    #         pickle.dump({
-    #             'reloc_nbhs': reloc_nbhs,
-    #             'state.node_demands': state.node_demands,
-    #             'state.tours': state.tours,
-    #             'state.edge_weights': state.edge_weights,
-    #             'state.max_tour_demand': state.max_tour_demand,
-    #             'deduped_reloc': reloc_nbhs_dict
-    #         }, fp)
     return reloc_nbhs_dict
 
 
@@ -901,26 +871,6 @@ def flatten_deduplicate_cross_nbh(
                 }
                 cross_nbh_dict[nbh_norm] = nb
 
-    # import random
-    # if random.uniform(0, 1.) < 0.01:
-    #     print(cross_nbhs)
-    #     print(state.node_demands)
-    #     print(state.tours)
-    #     print(state.edge_weights)
-    #     print(state.max_tour_demand)
-    #     import pickle
-    #     import uuid
-    #     with open(f"example_flatten_cross_inputs/dummy_flatten_deduplicate_cross_nbh_inputs_{uuid.uuid4()}.pkl",
-    #               "wb") as fp:
-    #         pickle.dump({
-    #             'cross_nbhs': cross_nbhs,
-    #             'state.node_demands': state.node_demands,
-    #             'state.tours': state.tours,
-    #             'state.edge_weights': state.edge_weights,
-    #             'state.max_tour_demand': state.max_tour_demand,
-    #             'deduped_cross': cross_nbh_dict
-    #         }, fp)
-
     return cross_nbh_dict
 
 
@@ -960,22 +910,6 @@ def flatten_deduplicate_2opt_nbh(
                     "cost": cost
                 }
                 two_opt_nbh_dict[nbh_norm] = nb
-
-    # import random
-    # if random.uniform(0, 1.) < 0.01:
-    #     print(twoopt_nbhs)
-    #     print(state.tours)
-    #     print(state.edge_weights)
-    #     import pickle
-    #     import uuid
-    #     with open(f"example_flatten_twoopt_inputs/dummyoopt_nbh_inputs_{uuid.uuid4()}.pkl",
-    #               "wb") as fp:
-    #         pickle.dump({
-    #             'twoopt_nbhs': twoopt_nbhs,
-    #             'state.tours': state.tours,
-    #             'state.edge_weights': state.edge_weights,
-    #             'deduped_cross': two_opt_nbh_dict
-    #         }, fp)
 
     return two_opt_nbh_dict
 
