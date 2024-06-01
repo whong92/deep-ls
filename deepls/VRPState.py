@@ -439,6 +439,7 @@ class VRPState:
                         'node_pos': tour_nodes_to_node_rep(tour),
                         'cum_dems': tour_nodes_to_cum_demands(tour, self.node_demands)
                     }
+        self.tour_adj = self._make_tours_adj(directed=False, sum=True)
         self.nbh = self.make_nbh()
 
     def all_tours_as_list(self, remove_last_depot=False, remove_first_depot=False):
@@ -455,33 +456,34 @@ class VRPState:
             all_tours_dict = {ti: t[:-1] for ti, t in all_tours_dict.items()}
         return all_tours_dict
 
-    def get_tours_adj(self, directed=False, sum=False):
+    def _make_tours_adj(self, directed=False, sum=False):
         tours = self.all_tours_as_list(remove_last_depot=True)
         W = np.zeros((self.N + 1, self.N + 1))
         for tour in tours:
-            for idx in range(len(tour) - 1):
-                i = int(tour[idx])
-                j = int(tour[idx + 1])
-                if sum:
-                    W[i][j] += 1
-                else:
-                    W[i][j] = 1
-                if not directed:
-                    if sum:
-                        W[j][i] += 1
-                    else:
-                        W[j][i] = 1
-                # Add final connection of tour in edge target
+            # vectorized impl
             if sum:
-                W[j][int(tour[0])] += 1
+                W[tour[:-1], tour[1:]] += 1
             else:
-                W[j][int(tour[0])] = 1
+                W[tour[:-1], tour[1:]] = 1
             if not directed:
                 if sum:
-                    W[int(tour[0])][j] += 1
+                    W[tour[1:], tour[:-1]] += 1
                 else:
-                    W[int(tour[0])][j] = 1
+                    W[tour[1:], tour[:-1]] = 1
+                # Add final connection of tour in edge target
+            if sum:
+                W[tour[-1]][int(tour[0])] += 1
+            else:
+                W[tour[-1]][int(tour[0])] = 1
+            if not directed:
+                if sum:
+                    W[int(tour[0])][tour[-1]] += 1
+                else:
+                    W[int(tour[0])][tour[-1]] = 1
         return W
+
+    def get_tours_adj(self):
+        return self.tour_adj
 
     def get_tour_lens(self, exclude_depot=True):
         all_tours_len = {ti: len(t['tour']) for ti, t in self.tours.items()}
@@ -981,7 +983,6 @@ class VRPNbHAutoReg:
         state: VRPState,
         move_0
     ):
-        second_moves = []
         if move_0['type'] == 'node':
             node = move_0['node']
             node_tour = move_0['tour_idx']
@@ -989,7 +990,6 @@ class VRPNbHAutoReg:
             reloc_nbh = enumerate_relocate_neighborhood_given(
                 node, node_tour, node_pos, self.tour_edges
             )
-            # reloc_nbh = flatten_deduplicate_reloc_nbh(reloc_nbh, state=state)
             reloc_nbh = vrpstate.flatten_reloc_nbh(
                 reloc_nbh,
                 state.tours,
@@ -998,7 +998,6 @@ class VRPNbHAutoReg:
                 state.max_tour_demand
             )
             reloc_nbh = list(reloc_nbh.values())
-            second_moves = reloc_nbh
 
             reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves(reloc_nbh, [], [])
         elif move_0['type'] == 'edge':
@@ -1006,8 +1005,6 @@ class VRPNbHAutoReg:
             edge_tour = move_0['tour_idx']
             cross_nbh = enumerate_cross_neighborhood_given(edge_tour, edge, self.tour_edges)
             two_opt_nbh = enumerate_2_opt_neighborhood_given(edge_tour, edge, self.tour_edges)
-            # cross_nbh = flatten_deduplicate_cross_nbh(cross_nbhs=cross_nbh, state=state)
-            # two_opt_nbh = flatten_deduplicate_2opt_nbh(two_opt_nbh, state=state)
             cross_nbh = vrpstate.flatten_cross_nbh(
                 cross_nbh,
                 state.tours,
@@ -1025,7 +1022,6 @@ class VRPNbHAutoReg:
             two_opt_nbh = list(two_opt_nbh.values())
 
             reloc_nbh_vect, cross_nbh_vect, twp_opt_nbh_vect = VRPNbHAutoReg.vectorize_moves([], cross_nbh, two_opt_nbh)
-            # second_moves = cross_nbh + two_opt_nbh
         else:
             raise ValueError("Fuck me")
 
@@ -1089,18 +1085,8 @@ def vectorize_cross_moves(cross_moves):
             for i, cross_move in enumerate(cross_moves):
                 edge = cross_move[key]
                 e0, e1 = edge
-                # if e0 == -1:
-                #     e0 = 0
-                # if e1 == -1:
-                #     e1 = 0
-                # if e0 > e1:
-                #     e0, e1 = e1, e0
                 vectorized[key][i, 0] = e0
                 vectorized[key][i, 1] = e1
-            # vectorized[key] = np.stack([
-            #     normalize_edge(np.array(cross_move[key]))
-            #     for cross_move in cross_moves
-            # ], axis=0)
     for key in ['tour0', 'tour1', 'cost']:
         vectorized[key] = np.array(
             [reloc_move[key] for reloc_move in cross_moves]
@@ -1123,18 +1109,8 @@ def vectorize_reloc_moves(reloc_moves):
             for i, reloc_move in enumerate(reloc_moves):
                 edge = reloc_move[key]
                 e0, e1 = edge
-                # if e0 == -1:
-                #     e0 = 0
-                # if e1 == -1:
-                #     e1 = 0
-                # if e0 > e1:
-                #     e0, e1 = e1, e0
                 vectorized[key][i, 0] = e0
                 vectorized[key][i, 1] = e1
-            # vectorized[key] = np.stack([
-            #     normalize_edge(np.array(reloc_move[key]))
-            #     for reloc_move in reloc_moves
-            # ], axis=0)
     for key in ['tour0', 'tour1', 'src_node', 'cost']:
         vectorized[key] = np.array(
             [reloc_move[key] for reloc_move in reloc_moves]
@@ -1157,18 +1133,8 @@ def vectorize_twopt_moves(twopt_moves):
             for i, twopt_move in enumerate(twopt_moves):
                 edge = twopt_move[key]
                 e0, e1 = edge
-                # if e0 == -1:
-                #     e0 = 0
-                # if e1 == -1:
-                #     e1 = 0
-                # if e0 > e1:
-                #     e0, e1 = e1, e0
                 vectorized[key][i, 0] = e0
                 vectorized[key][i, 1] = e1
-            # vectorized[key] = np.stack([
-            #     normalize_edge(np.array(twopt_move[key]))
-            #     for twopt_move in twopt_moves
-            # ], axis=0)
     for key in ['tour_idx', 'cost']:
         vectorized[key] = np.array(
             [reloc_move[key] for reloc_move in twopt_moves]
