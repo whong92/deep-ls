@@ -65,7 +65,8 @@ envs = VRPMultiFileEnv(
     num_samples_per_instance=12,
     num_instance_per_batch=1,
     reward_mode=VRPReward.DELTA_COST,
-    vectorize_state=True
+    vectorize_state=True,
+    num_proc=3
 )
 pbar = tqdm(range(episodes))
 opt_gaps = 0.

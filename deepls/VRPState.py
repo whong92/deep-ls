@@ -530,6 +530,7 @@ class VRPState:
             )
         else:
             raise ValueError("Invalid move type")
+        self.tour_adj = self._make_tours_adj(directed=False, sum=True)
         self.nbh = self.make_nbh()
 
     def _apply_cross_move(
@@ -1309,56 +1310,65 @@ import cloudpickle
 
 def worker(remote, parent_remote, env_fn, env_idx):
     parent_remote.close()
-    env: VRPEnvBase = env_fn()
-    env.init()
+    envs: List[VRPEnvBase] = env_fn()
+    for env in envs:
+        env.init()
     np.random.seed(env_idx)
 
-    cur_instance = None
-    cur_instance_id = None
-    max_num_steps = None
+    cur_instance_ids = None
+    max_num_stepss = None
 
     while True:
         cmd, data = remote.recv()
 
         if cmd == 'step':
-            action = data
-            ob, reward, done = env.step(action)
-            remote.send((ob, reward, done))
+            actions = data
+            ret = []
+            for action, env in zip(actions, envs):
+                ob, reward, done = env.step(action)
+                ret.append((ob, reward, done))
+            remote.send(ret)
 
         # elif cmd == 'reset':
         #     remote.send(env.reset())
 
         elif cmd == 'reset_episode':
-            assert cur_instance_id, "cannot reset episode before setting a run instance"
-            remote.send(env.set_instance_as_state(
-                instance=env.cur_instance,
-                init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-                best_tour_alt=env.best_state_tour,
-                id=cur_instance_id,
-                max_num_steps=max_num_steps
-            ))
+            assert cur_instance_ids, "cannot reset episode before setting a run instance"
+            remote.send([
+                env.set_instance_as_state(
+                    instance=env.cur_instance,
+                    init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                    best_state_tour=env.best_state_tour,
+                    id=cur_instance_id,
+                    max_num_steps=max_num_steps
+                ) for env, cur_instance_id, max_num_steps in zip(envs, cur_instance_ids, max_num_stepss)
+            ])
         
         elif cmd == 'set_instance_run':
-            cur_instance, cur_instance_id, max_num_steps = data
-            remote.send(env.set_instance_as_state(
-                instance=cur_instance,
-                init_tour=None,
-                best_tour_alt=None,
-                id=cur_instance_id,
-                max_num_steps=max_num_steps
-            ))
+            cur_instances, cur_instance_ids, max_num_stepss = data
+            remote.send([
+                env.set_instance_as_state(
+                    instance=cur_instance,
+                    init_tour=None,
+                    best_state_tour=None,
+                    id=cur_instance_id,
+                    max_num_steps=max_num_steps
+                ) for env, cur_instance, cur_instance_id, max_num_steps in
+                zip(envs, cur_instances, cur_instance_ids, max_num_stepss)
+            ])
 
         elif cmd == 'get_state':
-            remote.send(env.get_state())
+            remote.send([env.get_state() for env in envs])
 
         elif cmd == 'get_instance':
-            remote.send(env.cur_instance)
+            remote.send([env.cur_instance for env in envs])
 
         elif cmd == 'get_second_move':
-            remote.send(env.get_second_move(data))
+            first_movess = data
+            remote.send([env.get_second_move(first_move) for env, first_move in zip(envs, first_movess)])
 
         elif cmd == 'get_first_move':
-            remote.send(env.get_first_move())
+            remote.send([env.get_first_move() for env in envs])
 
         # elif cmd == 'render':
         #     remote.send(env.render())
@@ -1389,19 +1399,34 @@ class CloudpickleWrapper(object):
         return self.x()
 
 
-def make_mp_envs(num_env, num_steps, max_tour_demand, reward_mode, initializer, vectorize_state):
+def make_mp_envs(num_env_per_proc, num_proc, num_steps, max_tour_demand, reward_mode, initializer, vectorize_state):
     def make_env():
         def fn():
-            env = VRPEnvBase(
-                max_num_steps=num_steps,
-                max_tour_demand=max_tour_demand,
-                reward_mode=reward_mode,
-                initializer=initializer,
-                vectorize_state=vectorize_state
-            )
-            return env
+            envs = [
+                VRPEnvBase(
+                    max_num_steps=num_steps,
+                    max_tour_demand=max_tour_demand,
+                    reward_mode=reward_mode,
+                    initializer=initializer,
+                    vectorize_state=vectorize_state
+                )
+                for _ in range(num_env_per_proc)
+            ]
+            return envs
         return fn
-    return SubprocVecEnv([make_env() for i in range(num_env)])
+    return SubprocVecEnv([make_env() for i in range(num_proc)])
+
+
+def chunk_list(lst, n_chunks):
+    chunk_size = int(len(lst) / n_chunks)
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+
+def unchunk_list(lst_of_chunks):
+    lst = []
+    for chunk in lst_of_chunks:
+        lst.extend(chunk)
+    return lst
 
 
 class SubprocVecEnv:
@@ -1430,15 +1455,15 @@ class SubprocVecEnv:
             raise Exception
         self.waiting = True
 
-        for remote, action in zip(self.remotes, actions):
-            remote.send(('step', (action)))
+        for remote, _actions in zip(self.remotes, chunk_list(actions, self.no_of_envs)):
+            remote.send(('step', (_actions)))
 
     def step_wait(self):
         if not self.waiting:
             raise Exception
         self.waiting = False
 
-        results = [remote.recv() for remote in self.remotes]
+        results = unchunk_list([remote.recv() for remote in self.remotes])
         obs, rews, dones = zip(*results)
         return obs, rews, dones
 
@@ -1450,11 +1475,13 @@ class SubprocVecEnv:
         self,
         instances, instance_ids, max_num_stepss
     ):
-        # print(instance_ids)
-        for remote, instance, instance_id, max_num_steps in \
-                zip(self.remotes, instances, instance_ids, max_num_stepss):
-            remote.send(('set_instance_run', (instance, instance_id, max_num_steps)))
-        return [remote.recv() for remote in self.remotes]
+        instances_chunks = chunk_list(instances, self.no_of_envs)
+        instance_ids_chunks = chunk_list(instance_ids, self.no_of_envs)
+        max_num_steps_chunks = chunk_list(max_num_stepss, self.no_of_envs)
+        for remote, _instances_chunk, _instance_ids_chunk, _max_num_steps_chunk in \
+                zip(self.remotes, instances_chunks, instance_ids_chunks, max_num_steps_chunks):
+            remote.send(('set_instance_run', (_instances_chunk, _instance_ids_chunk, _max_num_steps_chunk)))
+        return unchunk_list([remote.recv() for remote in self.remotes])
     
     def reset_episode(
         self,
@@ -1466,30 +1493,30 @@ class SubprocVecEnv:
         """
         for remote in self.remotes:
             remote.send(('reset_episode', (None, )))
-        return [remote.recv() for remote in self.remotes]
+        return unchunk_list([remote.recv() for remote in self.remotes])
 
     def get_state(self):
         for remote in self.remotes:
             remote.send(('get_state', (None, )))
-        states = [remote.recv() for remote in self.remotes]
+        states = unchunk_list([remote.recv() for remote in self.remotes])
         return states
 
     def get_first_move_from_states(self):
         for remote in self.remotes:
-            remote.send(('get_first_move', (None,)))
-        first_moves = [remote.recv() for remote in self.remotes]
+            remote.send(('get_first_move', (None, )))
+        first_moves = unchunk_list([remote.recv() for remote in self.remotes])
         return first_moves
 
     def get_second_move_from_states(self, moves_0):
-        for remote, move_0 in zip(self.remotes, moves_0):
-            remote.send(('get_second_move', move_0))
-        second_moves = [remote.recv() for remote in self.remotes]
+        for remote, _moves_0_chunk in zip(self.remotes, chunk_list(moves_0, self.no_of_envs)):
+            remote.send(('get_second_move', _moves_0_chunk))
+        second_moves = unchunk_list([remote.recv() for remote in self.remotes])
         return second_moves
 
     def get_instance(self):
         for remote in self.remotes:
             remote.send(('get_instance', (None,)))
-        states = [remote.recv() for remote in self.remotes]
+        states = unchunk_list([remote.recv() for remote in self.remotes])
         return states
 
     def close(self):
@@ -1552,7 +1579,7 @@ class VRPEnvBase(Env):
         self,
         instance,
         init_tour=None,
-        best_tour_alt=None,
+        best_state_tour=None,
         id: Optional[int] = None,
         max_num_steps: Optional[int] = None,
         ret_opt_tour: bool = False
@@ -1562,7 +1589,7 @@ class VRPEnvBase(Env):
         self._set_state(
             instance,
             state=state,
-            best_state_tour=best_tour_alt,
+            best_state_tour=best_state_tour,
             max_num_steps=max_num_steps
         )
         return self.get_state()
@@ -1576,7 +1603,7 @@ class VRPEnvBase(Env):
     ):
         self.cur_instance = instance
         self.state = state
-        self.best_state_tour = self.state.get_tours_adj(directed=False, sum=True) \
+        self.best_state_tour = self.state.get_tours_adj() \
             if best_state_tour is None else best_state_tour
         self.cur_state_cost = self.state.get_cost(exclude_depot=False)
         self.best_state_cost = self.cur_state_cost
@@ -1612,7 +1639,7 @@ class VRPEnvBase(Env):
     def _update_best_state(self):
         self.cur_state_cost = self.state.get_cost(exclude_depot=False)
         if self.cur_state_cost < self.best_state_cost:
-            self.best_state_tour = self.state.get_tours_adj(directed=False, sum=True)
+            self.best_state_tour = self.state.get_tours_adj()
             self.best_state_cost = self.cur_state_cost
 
     def step(self, action: Dict):
@@ -1706,7 +1733,7 @@ class VRPEnvRandom(VRPEnvBase):
         self.set_instance_as_state(
             self.cur_instance,
             init_tour=self.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-            best_tour_alt=self.best_state_tour,
+            best_state_tour=self.best_state_tour,
             id=self.state.id,
             ret_opt_tour=self.ret_opt_tour
         )
@@ -1768,13 +1795,12 @@ def model_input_from_states(
     for state, best_state_tour in zip(states, best_states_tour):
         x_tour.append(
             torch.Tensor(
-                state.get_tours_adj(directed=False, sum=True)
+                state.get_tours_adj()
             ).unsqueeze(0).to(torch.long)
         )
         if best_state_tour is not None:
             x_best_tour.append(
                 torch.as_tensor(
-                    # best_state.get_tours_adj(directed=False, sum=True)
                     best_state_tour
                 ).unsqueeze(0).to(torch.long)
             )
@@ -1919,12 +1945,18 @@ class VRPMultiEnvAbstract(Env):
         seed=42,
         initializer=VRPInitTour.SINGLETON,
         vectorize_state: bool = False,
+        num_proc: Optional[int] = None,
     ):
         self.num_envs = num_samples_per_instance * num_instance_per_batch
+        if num_proc is None:
+            num_proc = self.num_envs
+        assert (self.num_envs % num_proc) == 0
+        num_env_per_proc = self.num_envs // num_proc
         self.max_num_steps = max_num_steps
         self.max_tour_demand = max_tour_demand
         self.envs = make_mp_envs(
-            num_env=self.num_envs,
+            num_env_per_proc=num_env_per_proc,
+            num_proc=num_proc,
             num_steps=max_num_steps,
             max_tour_demand=max_tour_demand,
             reward_mode=reward_mode,
@@ -2387,7 +2419,7 @@ if __name__=="__main__":
         state.apply_move(random_nb)
 
         adj = torch.as_tensor(
-            state.get_tours_adj(sum=True).astype(int)
+            state.get_tours_adj().astype(int)
         ).long()[None, :, :]
         x_emb, e_emb = rgcn(
             torch.stack([adj, adj], dim=3),

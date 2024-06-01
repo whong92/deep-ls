@@ -161,7 +161,8 @@ def run_experiment(
         num_instance_per_batch=num_instance_per_batch,
         reward_mode=reward_mode,
         initializer=initializer,
-        vectorize_state=True
+        vectorize_state=True,
+        num_proc=3
     )
     env.reset()
 
