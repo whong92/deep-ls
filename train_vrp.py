@@ -42,8 +42,8 @@ VRP_SIZE_TO_RUN_SCHED = {
     # schedule for 50 nodes (after 20 node pretrain)
     50: {
         'runs': [0, 5000],
-        'episode_lens': [10, 20],
-        'run_lens': [10, 5],
+        'episode_lens': [10, 10],
+        'run_lens': [10, 10],
     },
     # 'run_sched': {
     #     'runs': [0, 2500, 5000, 7500],
@@ -162,7 +162,7 @@ def run_experiment(
         reward_mode=reward_mode,
         initializer=initializer,
         vectorize_state=True,
-        num_proc=3
+        num_proc=None
     )
     env.reset()
 
@@ -279,10 +279,8 @@ if __name__ == "__main__":
         'batch_sz': 64,
         'minibatch_sz': 32,
         # after how many episodes do we optimize policy / critic?
-        'policy_optimize_every': 2,
+        'policy_optimize_every': 1,
         'critic_optimize_every': 1,
-        # only useful for critic baseline models
-        'dont_optimize_policy_steps': 0,
         # this doesn't work well - PPO's lower bound surrogate loss isn't as effective as the exact PG loss
         # we don't have a convergence issue anyways, so this was purely for intellectual interest
         'use_ppo_update': False,
@@ -300,8 +298,8 @@ if __name__ == "__main__":
             "num_edge_cat_features": 2
         },
         'optim': {
-            'step_size': 1e-4,
-            'step_size_critic': 5e-4,
+            'step_size': 2e-6, # 1e-4,
+            'step_size_critic': 2e-4,
             'beta_m': 0.9,
             'beta_v': 0.999,
             'epsilon': 1e-8
@@ -311,7 +309,7 @@ if __name__ == "__main__":
 
     experiment_config = {
         'ramp_up': False,
-        'problem_sz': 10,
+        'problem_sz': 50,
         'experiment_name': '10-nodes-profiling',
         'model_ckpt': None, # f'{args.modelroot}/vrp-50-nodes-chunked-episodes-cost-emb-delta-cost-longer-eps/model-03000-val-0.094.ckpt',
         'num_samples_per_instance': 12,
