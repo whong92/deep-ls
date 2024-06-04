@@ -226,7 +226,8 @@ def run_experiment(
                         train_opt_gaps = np.array([state.best_states_cost[0] / opt_cost - 1. for state in states])
                         train_opt_gap = np.mean(train_opt_gaps)
                         train_opt_gap_std = np.std(train_opt_gaps)
-                        wandb_module.log({'opt_gap_mean': train_opt_gap, 'opt_gap_std': train_opt_gap_std})
+                        if wandb_module is not None:
+                            wandb_module.log({'opt_gap_mean': train_opt_gap, 'opt_gap_std': train_opt_gap_std})
 
                         if moving_avg_train_opt_gap is None:
                             moving_avg_train_opt_gap = train_opt_gap

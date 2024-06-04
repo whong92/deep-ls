@@ -1664,14 +1664,14 @@ class VRPEnvBase(Env):
                 move = action['move']
                 self.state.apply_move(move)
                 reward = 0.
+                self._update_best_state()
         else:
             if not self.done:
                 move = action['move']
                 self.state.apply_move(move)
+                self._update_best_state()
             delta -= self.best_state_cost
             reward = delta
-
-        self._update_best_state()
 
         return self.get_state(), reward, self.done
 
