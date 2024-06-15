@@ -13,6 +13,17 @@ from deepls.vrp_gcn_model import (
     AverageStateRewardBaselineAgentVRP, VRP_STANDARD_PROBLEM_CONF, CriticBaselineAgentVRP
 )
 
+import logging
+import sys
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+)
+# create logger
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.StreamHandler(sys.stdout))
+logger.setLevel(logging.DEBUG)
+
+
 font = cv2.FONT_HERSHEY_COMPLEX_SMALL
 
 
@@ -312,10 +323,10 @@ if __name__ == "__main__":
         'ramp_up': False,
         'problem_sz': 50,
         'experiment_name': '10-nodes-profiling',
-        'model_ckpt': None, # f'{args.modelroot}/vrp-50-nodes-chunked-episodes-cost-emb-delta-cost-longer-eps/model-03000-val-0.094.ckpt',
+        'model_ckpt': f'{args.modelroot}/vrp-50-nodes-lr-2e-6-beta-1e-2-final-cost-singleton-init-from-scratch/model-02000-val-0.168.ckpt', # f'{args.modelroot}/vrp-50-nodes-chunked-episodes-cost-emb-delta-cost-longer-eps/model-03000-val-0.094.ckpt',
         'num_samples_per_instance': 12,
         'num_instance_per_batch': 1,
-        'reward_mode': VRPReward.FINAL_COST,
+        'reward_mode': VRPReward.DELTA_COST,
         'initializer': VRPInitTour.SINGLETON,
         'val_every': 500,
         'start_run': 0,
@@ -325,14 +336,14 @@ if __name__ == "__main__":
         'data_root': args.dataroot
     }
 
-    wandb.init(
-        # set the wandb project where this run will be logged
-        project="train-vrp",
-        name=experiment_config['experiment_name'],
-        # track hyperparameters and run metadata
-        config=experiment_config
-    )
+    # wandb.init(
+    #     # set the wandb project where this run will be logged
+    #     project="train-vrp",
+    #     name=experiment_config['experiment_name'],
+    #     # track hyperparameters and run metadata
+    #     config=experiment_config
+    # )
 
-    run_experiment(experiment_config, wandb_module=wandb)
+    run_experiment(experiment_config, wandb_module=None) # wandb)
 
-    wandb.finish()
+    # wandb.finish()

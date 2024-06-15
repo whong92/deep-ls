@@ -12,6 +12,17 @@ from sklearn.metrics.pairwise import euclidean_distances
 from deepls.graph_utils import tour_nodes_to_tour_len
 from enum import Enum
 
+import logging
+import sys
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+)
+# create logger
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.StreamHandler(sys.stdout))
+logger.setLevel(logging.DEBUG)
+
+
 def tour_nodes_to_node_rep(tour_nodes):
     # Compute node representation of tour
     nodes_target = {}
@@ -1320,6 +1331,7 @@ def worker(remote, parent_remote, env_fn, env_idx):
 
     while True:
         cmd, data = remote.recv()
+        logger.debug(f"received cmd {cmd}")
 
         if cmd == 'step':
             actions = data
@@ -1454,7 +1466,7 @@ class SubprocVecEnv:
         if self.waiting:
             raise Exception
         self.waiting = True
-
+        logger.debug("sending step async cmd")
         for remote, _actions in zip(self.remotes, chunk_list(actions, self.no_of_envs)):
             remote.send(('step', (_actions)))
 
@@ -1462,7 +1474,7 @@ class SubprocVecEnv:
         if not self.waiting:
             raise Exception
         self.waiting = False
-
+        logger.debug("waiting on step async cmd")
         results = unchunk_list([remote.recv() for remote in self.remotes])
         obs, rews, dones = zip(*results)
         return obs, rews, dones
@@ -1502,15 +1514,19 @@ class SubprocVecEnv:
         return states
 
     def get_first_move_from_states(self):
+        logger.debug("sending get first move cmd")
         for remote in self.remotes:
             remote.send(('get_first_move', (None, )))
         first_moves = unchunk_list([remote.recv() for remote in self.remotes])
+        logger.debug("recved get first move cmd")
         return first_moves
 
     def get_second_move_from_states(self, moves_0):
+        logger.debug("sending get 2nd move cmd")
         for remote, _moves_0_chunk in zip(self.remotes, chunk_list(moves_0, self.no_of_envs)):
             remote.send(('get_second_move', _moves_0_chunk))
         second_moves = unchunk_list([remote.recv() for remote in self.remotes])
+        logger.debug("recved get 2nd move cmd")
         return second_moves
 
     def get_instance(self):
