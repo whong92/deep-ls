@@ -12,17 +12,7 @@ from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPR
 from deepls.vrp_gcn_model import (
     AverageStateRewardBaselineAgentVRP, VRP_STANDARD_PROBLEM_CONF, CriticBaselineAgentVRP
 )
-
-import logging
-import sys
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-)
-# create logger
-logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler(sys.stdout))
-logger.setLevel(logging.DEBUG)
-
+import multiprocessing
 
 font = cv2.FONT_HERSHEY_COMPLEX_SMALL
 
@@ -30,13 +20,15 @@ font = cv2.FONT_HERSHEY_COMPLEX_SMALL
 VRP_SIZE_TO_TRAIN_DATA_F = {
     10: 'size-10/vrp_data_with_results_train.pkl',
     20: 'size-20/vrp_data_with_results_train.pkl',
-    50: 'size-50/vrp_data_with_results.pkl'
+    50: 'size-50/vrp_data_with_results.pkl',
+    100: 'size-100/vrp_data_with_results.pkl'
 }
 
 VRP_SIZE_TO_VAL_DATA_F = {
     10: 'size-10/vrp_data_with_results_val.pkl',
     20: 'size-20/vrp_data_with_results_val.pkl',
-    50: 'size-50/vrp_data_with_results.pkl'
+    50: 'size-50/vrp_data_with_results.pkl',
+    100: 'size-100/vrp_data_with_results.pkl'
 }
 
 VRP_SIZE_TO_RUN_SCHED = {
@@ -46,21 +38,21 @@ VRP_SIZE_TO_RUN_SCHED = {
         'run_lens': [2, 4, 2],
     },
     20: {
-        'runs': [0, 4000, 8000],
-        'episode_lens': [5, 10, 20],
-        'run_lens': [4, 4, 2],
+        'runs': [0, 4000],
+        'episode_lens': [5, 10],
+        'run_lens': [4, 4],
     },
     # schedule for 50 nodes (after 20 node pretrain)
     50: {
         'runs': [0, 5000],
         'episode_lens': [10, 10],
-        'run_lens': [10, 10],
+        'run_lens': [10, 20],
     },
-    # 'run_sched': {
-    #     'runs': [0, 2500, 5000, 7500],
-    #     'episode_lens': [25, 50, 50, 100],
-    #     'run_lens': [4, 2, 4, 2],
-    # },
+    'run_sched': {
+        'runs': [0, 2500, 5000],
+        'episode_lens': [10, 10, 10],
+        'run_lens': [10, 20, 40],
+    },
 }
 
 VRP_SIZE_TO_RUN_SCHED_SS = {
@@ -77,8 +69,13 @@ VRP_SIZE_TO_RUN_SCHED_SS = {
     # schedule for 50 nodes (after 20 node pretrain)
     50: {
         'runs': [0],
-        'episode_lens': [50],
-        'run_lens': [2],
+        'episode_lens': [10],
+        'run_lens': [20],
+    },
+    100: {
+        'runs': [0],
+        'episode_lens': [10],
+        'run_lens': [40],
     },
 }
 
@@ -133,7 +130,8 @@ class RunSched:
 
 def run_experiment(
     experiment_config,
-    wandb_module=None
+    wandb_module=None,
+    multiproc=False
 ):
     experiment_name = experiment_config.get('experiment_name', 'default')
     problem_sz = experiment_config['problem_sz']
@@ -162,19 +160,33 @@ def run_experiment(
 
     agent_config = experiment_config['agent_config']
 
-    # env = VRPMultiFileEnvSingleProc(
-    env = VRPMultiFileEnv(
-        data_f=train_data_f,
-        num_nodes=problem_sz,
-        max_num_steps=problem_sz,
-        max_tour_demand=max_tour_demand,
-        num_samples_per_instance=num_samples_per_instance,
-        num_instance_per_batch=num_instance_per_batch,
-        reward_mode=reward_mode,
-        initializer=initializer,
-        vectorize_state=True,
-        num_proc=None
-    )
+    if not multiproc:
+        env = VRPMultiFileEnvSingleProc(
+            data_f=train_data_f,
+            num_nodes=problem_sz,
+            max_num_steps=problem_sz,
+            max_tour_demand=max_tour_demand,
+            num_samples_per_instance=num_samples_per_instance,
+            num_instance_per_batch=num_instance_per_batch,
+            reward_mode=reward_mode,
+            initializer=initializer,
+            vectorize_state=True,
+        )
+    else:
+        num_proc = multiprocessing.cpu_count()
+        env = VRPMultiFileEnv(
+            data_f=train_data_f,
+            num_nodes=problem_sz,
+            max_num_steps=problem_sz,
+            max_tour_demand=max_tour_demand,
+            num_samples_per_instance=num_samples_per_instance,
+            num_instance_per_batch=num_instance_per_batch,
+            reward_mode=reward_mode,
+            initializer=initializer,
+            vectorize_state=True,
+            num_proc=num_proc
+        )
+
     env.reset()
 
     # env_val = VRPMultiFileEnv(
@@ -310,7 +322,7 @@ if __name__ == "__main__":
             "num_edge_cat_features": 2
         },
         'optim': {
-            'step_size': 2e-6, # 1e-4,
+            'step_size': 1e-5,
             'step_size_critic': 2e-4,
             'beta_m': 0.9,
             'beta_v': 0.999,
@@ -321,12 +333,12 @@ if __name__ == "__main__":
 
     experiment_config = {
         'ramp_up': False,
-        'problem_sz': 50,
+        'problem_sz': 10,
         'experiment_name': '10-nodes-profiling',
-        'model_ckpt': f'{args.modelroot}/vrp-50-nodes-lr-2e-6-beta-1e-2-final-cost-singleton-init-from-scratch/model-02000-val-0.168.ckpt', # f'{args.modelroot}/vrp-50-nodes-chunked-episodes-cost-emb-delta-cost-longer-eps/model-03000-val-0.094.ckpt',
+        'model_ckpt': None, # f'{args.modelroot}/vrp-50-nodes-lr-2e-6-beta-1e-2-final-cost-singleton-init-from-scratch/model-02000-val-0.168.ckpt', # f'{args.modelroot}/vrp-50-nodes-chunked-episodes-cost-emb-delta-cost-longer-eps/model-03000-val-0.094.ckpt',
         'num_samples_per_instance': 12,
         'num_instance_per_batch': 1,
-        'reward_mode': VRPReward.DELTA_COST,
+        'reward_mode': VRPReward.FINAL_COST,
         'initializer': VRPInitTour.SINGLETON,
         'val_every': 500,
         'start_run': 0,
@@ -344,6 +356,6 @@ if __name__ == "__main__":
     #     config=experiment_config
     # )
 
-    run_experiment(experiment_config, wandb_module=None) # wandb)
+    run_experiment(experiment_config, wandb_module=None, multiproc=False) # wandb)
 
     # wandb.finish()

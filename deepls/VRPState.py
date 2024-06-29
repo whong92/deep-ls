@@ -1,26 +1,11 @@
 import numpy as np
-from typing import List, Optional, Dict, Tuple, Any, Union
-import random
+from typing import List, Optional, Dict, Any, Union
 import vrpstate
-import pickle
-
-from datetime import datetime
 import torch
 
-import os, sys
 from sklearn.metrics.pairwise import euclidean_distances
 from deepls.graph_utils import tour_nodes_to_tour_len
 from enum import Enum
-
-import logging
-import sys
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-)
-# create logger
-logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler(sys.stdout))
-logger.setLevel(logging.DEBUG)
 
 
 def tour_nodes_to_node_rep(tour_nodes):
@@ -1331,7 +1316,6 @@ def worker(remote, parent_remote, env_fn, env_idx):
 
     while True:
         cmd, data = remote.recv()
-        logger.debug(f"received cmd {cmd}")
 
         if cmd == 'step':
             actions = data
@@ -1466,7 +1450,6 @@ class SubprocVecEnv:
         if self.waiting:
             raise Exception
         self.waiting = True
-        logger.debug("sending step async cmd")
         for remote, _actions in zip(self.remotes, chunk_list(actions, self.no_of_envs)):
             remote.send(('step', (_actions)))
 
@@ -1474,7 +1457,6 @@ class SubprocVecEnv:
         if not self.waiting:
             raise Exception
         self.waiting = False
-        logger.debug("waiting on step async cmd")
         results = unchunk_list([remote.recv() for remote in self.remotes])
         obs, rews, dones = zip(*results)
         return obs, rews, dones
@@ -1514,19 +1496,15 @@ class SubprocVecEnv:
         return states
 
     def get_first_move_from_states(self):
-        logger.debug("sending get first move cmd")
         for remote in self.remotes:
             remote.send(('get_first_move', (None, )))
         first_moves = unchunk_list([remote.recv() for remote in self.remotes])
-        logger.debug("recved get first move cmd")
         return first_moves
 
     def get_second_move_from_states(self, moves_0):
-        logger.debug("sending get 2nd move cmd")
         for remote, _moves_0_chunk in zip(self.remotes, chunk_list(moves_0, self.no_of_envs)):
             remote.send(('get_second_move', _moves_0_chunk))
         second_moves = unchunk_list([remote.recv() for remote in self.remotes])
-        logger.debug("recved get 2nd move cmd")
         return second_moves
 
     def get_instance(self):
@@ -1909,7 +1887,7 @@ class VRPMultiEnvSingleProcAbstract:
             _state = env.set_instance_as_state(
                 instance=cur_instance,
                 init_tour=None,
-                best_tour=None,
+                best_state_tour=None,
                 id=cur_instance_id,
                 max_num_steps=max_num_steps
             )
@@ -1920,7 +1898,7 @@ class VRPMultiEnvSingleProcAbstract:
             env.set_instance_as_state(
                 instance=env.cur_instance,
                 init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
-                best_tour=env.best_state_tour, # env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
+                best_state_tour=env.best_state_tour, # env.best_state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
                 id=cur_instance_id,
                 max_num_steps=env.max_num_steps  # same run, inherit from last episode
             )
@@ -1939,7 +1917,7 @@ class VRPMultiEnvSingleProcAbstract:
         return [env.get_state() for env in self.envs]
 
     def get_instance(self):
-        return [env.get_instance() for env in self.envs]
+        return [env.cur_instance for env in self.envs]
 
     def get_first_moves(self):
         return [env.get_first_move() for env in self.envs]
@@ -1964,9 +1942,14 @@ class VRPMultiEnvAbstract(Env):
         num_proc: Optional[int] = None,
     ):
         self.num_envs = num_samples_per_instance * num_instance_per_batch
-        if num_proc is None:
+        if num_proc is None or num_proc > self.num_envs:
             num_proc = self.num_envs
-        assert (self.num_envs % num_proc) == 0
+        # find a target number of processes that evely divides the number of envs
+        if num_proc < self.num_envs:
+            for n in range(num_proc, 0, -1):
+                if (self.num_envs % n) == 0:
+                    num_proc = n
+                    break
         num_env_per_proc = self.num_envs // num_proc
         self.max_num_steps = max_num_steps
         self.max_tour_demand = max_tour_demand
