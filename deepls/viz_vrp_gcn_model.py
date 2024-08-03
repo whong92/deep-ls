@@ -44,20 +44,11 @@ workdir = '/home/ong/personal/deep-ls-tsp'
 
 agent = AverageStateRewardBaselineAgentVRP()
 agent.agent_init(agent_config)
-agent.load(f'{workdir}/model/vrp-50-nodes-lr-2e-6-beta-2e-3-longer-delta-cost-singleton-init-from-scratch/model-04000-val-0.071.ckpt', init_config=False)
+agent.load(f'{workdir}/model/vrp-50-nodes-lr-2e-6-beta-0-shorter-final-cost-singleton-init-from-scratch-2024-07-14/model-05500-val-0.166.ckpt', init_config=False)
 agent.set_eval()
 # agent.set_train()
 
-# envs = VRPMultiFileEnvSingleProc(
-#     data_f=f'{workdir}/data/vrp-data/size-50/vrp_data_with_results.pkl',
-#     num_nodes=N,
-#     max_num_steps=num_steps,
-#     max_tour_demand=max_tour_demand,
-#     num_samples_per_instance=12,
-#     num_instance_per_batch=1,
-#     reward_mode=VRPReward.DELTA_COST
-# )
-envs = VRPMultiFileEnv(
+envs = VRPMultiFileEnvSingleProc(
     data_f=f'{workdir}/data/vrp-data/size-50/vrp_data_with_results.pkl',
     num_nodes=N,
     max_num_steps=num_steps,
@@ -65,9 +56,19 @@ envs = VRPMultiFileEnv(
     num_samples_per_instance=12,
     num_instance_per_batch=1,
     reward_mode=VRPReward.DELTA_COST,
-    vectorize_state=True,
-    num_proc=3
+    vectorize_state=True
 )
+# envs = VRPMultiFileEnv(
+#     data_f=f'{workdir}/data/vrp-data/size-50/vrp_data_with_results.pkl',
+#     num_nodes=N,
+#     max_num_steps=num_steps,
+#     max_tour_demand=max_tour_demand,
+#     num_samples_per_instance=12,
+#     num_instance_per_batch=1,
+#     reward_mode=VRPReward.DELTA_COST,
+#     vectorize_state=True,
+#     num_proc=3
+# )
 pbar = tqdm(range(episodes))
 opt_gaps = 0.
 
@@ -80,7 +81,8 @@ for episode in pbar:
     best_opts = []
     step = 0
     # env.set_instance_as_state(instance, id=episode, max_num_steps=num_steps)
-    states: List[VectorizedState] = envs.reset(fetch_next=True)
+    envs.reset(fetch_next=True)
+    states: List[VectorizedState] = envs.get_state()
     actions = agent.agent_start(states, envs)
     # init_cost = states[0][1].get_cost(exclude_depot=False)
     init_cost = states[0].states_cost[0]
@@ -122,5 +124,5 @@ opts_all = {
     'state_opts_all': state_opts_all,
     'best_opts_all': best_opts_all,
 }
-with open("viz_eval_opts_all_beta_2e-3_long_delta_vectorized_impl.json", "w") as fp:
+with open("viz_eval_opts_all_beta_0_final_cost_after_5000.json", "w") as fp:
     json.dump(opts_all, fp)
