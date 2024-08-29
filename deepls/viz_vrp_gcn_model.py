@@ -44,7 +44,7 @@ workdir = '/home/ong/personal/deep-ls-tsp'
 
 agent = AverageStateRewardBaselineAgentVRP()
 agent.agent_init(agent_config)
-agent.load(f'{workdir}/model/vrp-50-nodes-lr-2e-6-beta-0-shorter-final-cost-singleton-init-from-scratch-2024-07-14/model-05500-val-0.166.ckpt', init_config=False)
+agent.load(f'{workdir}/model/vrp-50-nodes-lr-2e-6-beta-2e-3-delta-cost-singleton-init-from-ckpt-incremental_improvements/model-04500-val-0.117.ckpt', init_config=False)
 agent.set_eval()
 # agent.set_train()
 
@@ -124,5 +124,5 @@ opts_all = {
     'state_opts_all': state_opts_all,
     'best_opts_all': best_opts_all,
 }
-with open("viz_eval_opts_all_beta_0_final_cost_after_5000.json", "w") as fp:
+with open("viz_eval_opts_all_beta_2e-3_again.json", "w") as fp:
     json.dump(opts_all, fp)

@@ -45,8 +45,8 @@ VRP_SIZE_TO_RUN_SCHED = {
     # schedule for 50 nodes (after 20 node pretrain)
     50: {
         'runs': [0, 5000],
-        'episode_lens': [10, 10],
-        'run_lens': [5, 10],
+        'episode_lens': [10, 20],
+        'run_lens': [5, 5],
     },
     'run_sched': {
         'runs': [0, 2500, 5000],
