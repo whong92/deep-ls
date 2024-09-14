@@ -49,9 +49,9 @@ VRP_SIZE_TO_RUN_SCHED = {
         'run_lens': [5, 5],
     },
     100: {
-        'runs': [0, 5000],
-        'episode_lens': [10, 20],
-        'run_lens': [10, 10],
+        'runs': [0, 2500, 5000],
+        'episode_lens': [10, 10, 20],
+        'run_lens': [10, 12, 10],
     },
 }
 
