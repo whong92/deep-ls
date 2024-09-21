@@ -1395,7 +1395,7 @@ class CloudpickleWrapper(object):
         return self.x()
 
 
-def make_mp_envs(num_env_per_proc, num_proc, num_steps, max_tour_demand, reward_mode, initializer, vectorize_state):
+def make_mp_envs(num_env_per_proc, num_proc, num_steps, max_tour_demand, reward_mode, initializer, vectorize_state, best_cost_eta):
     def make_env():
         def fn():
             envs = [
@@ -1404,7 +1404,8 @@ def make_mp_envs(num_env_per_proc, num_proc, num_steps, max_tour_demand, reward_
                     max_tour_demand=max_tour_demand,
                     reward_mode=reward_mode,
                     initializer=initializer,
-                    vectorize_state=vectorize_state
+                    vectorize_state=vectorize_state,
+                    best_cost_eta=best_cost_eta
                 )
                 for _ in range(num_env_per_proc)
             ]
@@ -1539,7 +1540,8 @@ class VRPEnvBase(Env):
         ret_best_state=True,
         max_tour_demand=10.,
         initializer: VRPInitTour = VRPInitTour.SINGLETON,
-        vectorize_state: bool = False
+        vectorize_state: bool = False,
+        best_cost_eta: float = 1.0
     ):
         super(VRPEnvBase, self).__init__()
         # config vars
@@ -1551,6 +1553,8 @@ class VRPEnvBase(Env):
         self.reward_mode = reward_mode
         self.initializer = initializer
         self.vectorize_state = vectorize_state
+        assert 0.0 <= best_cost_eta <= 1.0
+        self.best_cost_eta = best_cost_eta
 
     def init(self):
         self.cur_step = -1
@@ -1637,35 +1641,39 @@ class VRPEnvBase(Env):
             self.best_state_cost = self.cur_state_cost
 
     def step(self, action: Dict):
+        # this is here just to make sure we don't do anything after calling step after termination without
+        # resetting the environment
         if self.done:
             return self.state, 0, self.done
 
         self.cur_step += 1
+        # we're done IF we hit max_num_steps, or forcibly terminate
         if action['terminate']:
             self.done = True
 
         if self.cur_step == self.max_num_steps:
             self.done = True
 
-        delta = self.best_state_cost
-        self.cur_state_cost = self.state.get_cost(exclude_depot=False)
-        if self.reward_mode == VRPReward.FINAL_COST:
-            if self.done:
-                # if the action given in t-1 was terminate, or cur_step == T
-                # then the reward is cost(S[t-1])
-                reward = -self.best_state_cost
+        if self.done:
+            if self.reward_mode == VRPReward.FINAL_COST:
+                # FINAL_COST, last reward step is minus the best state cost so far
+                reward = -(self.best_cost_eta * self.best_state_cost + (1 - self.best_cost_eta) * self.cur_state_cost)
             else:
+                # in DELTA_COST mode, we don't do anything so delta score is zero
+                reward = 0.
+        else:
+            if self.reward_mode == VRPReward.FINAL_COST:
                 move = action['move']
                 self.state.apply_move(move)
                 reward = 0.
                 self._update_best_state()
-        else:
-            if not self.done:
+            else:
+                prev_step_cost = (self.best_cost_eta * self.best_state_cost + (1 - self.best_cost_eta) * self.cur_state_cost)
                 move = action['move']
                 self.state.apply_move(move)
                 self._update_best_state()
-            delta -= self.best_state_cost
-            reward = delta
+                cur_step_cost = (self.best_cost_eta * self.best_state_cost + (1 - self.best_cost_eta) * self.cur_state_cost)
+                reward = prev_step_cost - cur_step_cost
 
         return self.get_state(), reward, self.done
 
@@ -1702,7 +1710,8 @@ class VRPEnvRandom(VRPEnvBase):
         max_tour_demand=10.,
         ret_opt_tour=False,
         initializer=VRPInitTour.SINGLETON,
-        seed=42
+        seed=42,
+        best_cost_eta: float = 1.0
     ):
         super().__init__(
             max_num_steps=max_num_steps,
@@ -1710,6 +1719,7 @@ class VRPEnvRandom(VRPEnvBase):
             max_tour_demand=max_tour_demand,
             initializer=initializer,
             reward_mode=reward_mode,
+            best_cost_eta=best_cost_eta,
         )
         # config vars
         self.num_nodes = num_nodes
@@ -1835,7 +1845,8 @@ class VRPMultiEnvSingleProcAbstract:
         num_instance_per_batch=1,
         seed=42,
         initializer=VRPInitTour.SINGLETON,
-        vectorize_state: bool = False
+        vectorize_state: bool = False,
+        best_cost_eta: float = 1.0
     ):
         self.num_envs = num_samples_per_instance * num_instance_per_batch
         self.max_num_steps = max_num_steps
@@ -1846,7 +1857,8 @@ class VRPMultiEnvSingleProcAbstract:
                 max_tour_demand=max_tour_demand,
                 reward_mode=reward_mode,
                 initializer=initializer,
-                vectorize_state=vectorize_state
+                vectorize_state=vectorize_state,
+                best_cost_eta=best_cost_eta
             ) for _ in range(self.num_envs)
         ]
 
@@ -1940,6 +1952,7 @@ class VRPMultiEnvAbstract(Env):
         initializer=VRPInitTour.SINGLETON,
         vectorize_state: bool = False,
         num_proc: Optional[int] = None,
+        best_cost_eta: float = 1.0
     ):
         self.num_envs = num_samples_per_instance * num_instance_per_batch
         if num_proc is None or num_proc > self.num_envs:
@@ -1960,7 +1973,8 @@ class VRPMultiEnvAbstract(Env):
             max_tour_demand=max_tour_demand,
             reward_mode=reward_mode,
             initializer=initializer,
-            vectorize_state=vectorize_state
+            vectorize_state=vectorize_state,
+            best_cost_eta=best_cost_eta
         )
 
         self.num_nodes = num_nodes

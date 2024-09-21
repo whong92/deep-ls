@@ -157,6 +157,7 @@ def run_experiment(
     train_runs = experiment_config['train_runs']
     reward_mode = experiment_config['reward_mode']
     initializer = experiment_config['initializer']
+    best_cost_eta = experiment_config.get('best_cost_eta', 1.0)
 
     agent_config = experiment_config['agent_config']
 
@@ -171,6 +172,7 @@ def run_experiment(
             reward_mode=reward_mode,
             initializer=initializer,
             vectorize_state=True,
+            best_cost_eta=best_cost_eta
         )
     else:
         num_proc = multiprocessing.cpu_count()
@@ -184,7 +186,8 @@ def run_experiment(
             reward_mode=reward_mode,
             initializer=initializer,
             vectorize_state=True,
-            num_proc=num_proc
+            num_proc=num_proc,
+            best_cost_eta=best_cost_eta
         )
 
     env.reset()
@@ -311,6 +314,7 @@ if __name__ == "__main__":
         # use for initial pre-train only
         'entropy_bonus': 0.002,
         'gamma': 0.99,
+        'best_cost_eta': 0.5,
         # architecture settings
         'model': {
             "node_dim": 2,
