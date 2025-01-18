@@ -8,11 +8,12 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPReward, VRPInitTour, VRPMultiFileEnvSingleProc
+from deepls.VRPState import VRPMultiRandomEnv, plot_state, VRPMultiFileEnv, VRPReward, VRPInitTour, VRPMultiFileEnvSingleProc, VectorizedState
 from deepls.vrp_gcn_model import (
     AverageStateRewardBaselineAgentVRP, VRP_STANDARD_PROBLEM_CONF, CriticBaselineAgentVRP
 )
 import multiprocessing
+from typing import List, Union, Optional, Any
 
 font = cv2.FONT_HERSHEY_COMPLEX_SMALL
 
@@ -106,7 +107,6 @@ class Run:
         return (self.episode % self.run_len) == 0
 
 
-from typing import List
 @dataclass
 class RunSched:
     runs: List[int]
@@ -128,6 +128,91 @@ class RunSched:
         raise Exception("should not hit this!")
 
 
+def run_train_run(
+    agent: AverageStateRewardBaselineAgentVRP,
+    irun: int,
+    run_sched: RunSched,
+    env: Union[VRPMultiFileEnvSingleProc, VRPMultiFileEnv],
+    wandb_module: Any = None
+):
+    agent.set_train()
+    episode_len, run_len = run_sched.get_schedule(irun)
+
+    for episode in range(run_len):
+        run = Run(episode, run_len)
+        if run.is_start:
+            # run for episode_len steps
+            env.reset(fetch_next=True, max_num_steps=episode_len)
+        else:
+            env.reset_episode()
+
+        states = env.get_state()
+        actions = agent.agent_start(states, env)
+        while True:
+            # Take a random action
+            # this return format is different from TSP's
+            states, rewards, dones = env.step(actions)
+            if dones[0] == True:
+                metrics = agent.agent_end(rewards)
+                if metrics and wandb_module is not None:
+                    wandb_module.log(metrics)
+                # if end of epoch
+                if run.is_end:
+                    if agent.critic_abs_err is not None:
+                        ve_error = float(torch.mean(agent.critic_abs_err).detach())
+                    else:
+                        ve_error = -1
+                    opt_cost = states[0].states_opt_cost[0]
+                    train_opt_gaps = np.array([state.best_states_cost[0] / opt_cost - 1. for state in states])
+                    train_opt_gap = np.mean(train_opt_gaps)
+                    train_opt_gap_std = np.std(train_opt_gaps)
+                    if wandb_module is not None:
+                        wandb_module.log({'opt_gap_mean': train_opt_gap, 'opt_gap_std': train_opt_gap_std})
+                    return train_opt_gap, ve_error
+                break
+            else:
+                actions = agent.agent_step(rewards, states, env)
+
+    assert False
+
+
+def run_eval_loop(
+    agent: AverageStateRewardBaselineAgentVRP,
+    env: Union[VRPMultiFileEnvSingleProc, VRPMultiFileEnv],
+    episodes: int
+):
+    # re-initialize to get the same start state
+    env.init()
+    agent.set_eval()
+    pbar = tqdm(range(episodes))
+
+    best_opts = []
+
+    for _ in pbar:
+        step = 0
+        env.reset(fetch_next=True)
+        states: List[VectorizedState] = env.get_state()
+        actions = agent.agent_start(states, env)
+        opt_cost = states[0].states_opt_cost[0]
+
+        while True:
+            step += 1
+            states, rewards, dones = env.step(actions)
+            done = dones[0]
+            if done:
+                best_opts.append(np.min([state.best_states_cost[0] / opt_cost - 1. for state in states]))
+                break
+            else:
+                actions = agent.agent_step(
+                    rewards,
+                    states,
+                    env
+                )
+
+
+    return np.mean(best_opts)
+
+
 def run_experiment(
     experiment_config,
     wandb_module=None,
@@ -136,7 +221,7 @@ def run_experiment(
     experiment_name = experiment_config.get('experiment_name', 'default')
     problem_sz = experiment_config['problem_sz']
 
-    # val_data_f = f"{experiment_config['data_root']}/{VRP_SIZE_TO_VAL_DATA_F[problem_sz]}"
+    val_data_f = f"{experiment_config['data_root']}/{VRP_SIZE_TO_VAL_DATA_F[problem_sz]}"
     train_data_f = f"{experiment_config['data_root']}/{VRP_SIZE_TO_TRAIN_DATA_F[problem_sz]}"
     model_root = f"{experiment_config['model_root']}/{experiment_name}/"
     if not os.path.exists(model_root):
@@ -149,6 +234,7 @@ def run_experiment(
         run_sched = RunSched(**VRP_SIZE_TO_RUN_SCHED[problem_sz])
     else:
         run_sched = RunSched(**VRP_SIZE_TO_RUN_SCHED_SS[problem_sz])
+
     model_ckpt = experiment_config.get('model_ckpt')
     num_samples_per_instance = experiment_config['num_samples_per_instance']
     num_instance_per_batch = experiment_config['num_instance_per_batch']
@@ -174,6 +260,18 @@ def run_experiment(
             vectorize_state=True,
             best_cost_eta=best_cost_eta
         )
+        env_val = VRPMultiFileEnvSingleProc(
+            data_f=val_data_f,
+            num_nodes=problem_sz,
+            max_num_steps=problem_sz * 2,
+            max_tour_demand=max_tour_demand,
+            num_samples_per_instance=num_samples_per_instance,
+            num_instance_per_batch=1,
+            reward_mode=reward_mode,
+            initializer=initializer,
+            vectorize_state=True,
+            best_cost_eta=best_cost_eta
+        )
     else:
         num_proc = multiprocessing.cpu_count()
         env = VRPMultiFileEnv(
@@ -189,18 +287,19 @@ def run_experiment(
             num_proc=num_proc,
             best_cost_eta=best_cost_eta
         )
-
-    env.reset()
-
-    # env_val = VRPMultiFileEnv(
-    #     data_f=val_data_f,
-    #     num_nodes=problem_sz,
-    #     max_num_steps=problem_sz,
-    #     max_tour_demand=max_tour_demand,
-    #     num_samples_per_instance=num_samples_per_instance,
-    #     num_instance_per_batch=1
-    # )
-    # env_val.reset()
+        env_val = VRPMultiFileEnv(
+            data_f=val_data_f,
+            num_nodes=problem_sz,
+            max_num_steps=problem_sz * 2,
+            max_tour_demand=max_tour_demand,
+            num_samples_per_instance=num_samples_per_instance,
+            num_instance_per_batch=1,
+            reward_mode=reward_mode,
+            initializer=initializer,
+            vectorize_state=True,
+            num_proc=num_proc,
+            best_cost_eta=best_cost_eta
+        )
 
     agent = AverageStateRewardBaselineAgentVRP()
     # agent = CriticBaselineAgentVRP()
@@ -216,60 +315,25 @@ def run_experiment(
     avg_train_opt_gaps = []
     avg_train_opt_gaps_ma = []
 
-    agent.set_train()
     pbar = tqdm(range(start_run, start_run + train_runs))
 
     moving_avg_train_opt_gap = None
 
     for irun in pbar:
-        episode_len, run_len = run_sched.get_schedule(irun)
-        # run for run_len episodes
-        for episode in range(run_len):
-            run = Run(episode, run_len)  # fractional run
-            if run.is_start:
-                # run for episode_len steps
-                env.reset(fetch_next=True, max_num_steps=episode_len)
-            else:
-                env.reset_episode()
-
-            states = env.get_state()
-            actions = agent.agent_start(states, env)
-            while True:
-                # Take a random action
-                # this return format is different from TSP's
-                states, rewards, dones = env.step(actions)
-                if dones[0] == True:
-                    metrics = agent.agent_end(rewards)
-                    if metrics and wandb_module is not None:
-                        wandb_module.log(metrics)
-                    # if end of epoch
-                    if run.is_end:
-                        if agent.critic_abs_err is not None:
-                            ve_error.append(torch.mean(agent.critic_abs_err).detach())
-                        else:
-                            ve_error.append(-1)
-                        opt_cost = states[0].states_opt_cost[0]
-                        train_opt_gaps = np.array([state.best_states_cost[0] / opt_cost - 1. for state in states])
-                        train_opt_gap = np.mean(train_opt_gaps)
-                        train_opt_gap_std = np.std(train_opt_gaps)
-                        if wandb_module is not None:
-                            wandb_module.log({'opt_gap_mean': train_opt_gap, 'opt_gap_std': train_opt_gap_std})
-
-                        if moving_avg_train_opt_gap is None:
-                            moving_avg_train_opt_gap = train_opt_gap
-                        else:
-                            moving_avg_train_opt_gap = 0.9 * moving_avg_train_opt_gap + 0.1 * train_opt_gap
-                        avg_train_opt_gaps.append(train_opt_gap)
-                        avg_train_opt_gaps_ma.append(moving_avg_train_opt_gap)
-                    break
-                else:
-                    actions = agent.agent_step(rewards, states, env)
+        _train_opt_gap, _ve_error = run_train_run(agent, irun, run_sched, env)
+        ve_error.append(_ve_error)
+        avg_train_opt_gaps.append(_train_opt_gap)
+        if moving_avg_train_opt_gap is None:
+            moving_avg_train_opt_gap = _train_opt_gap
+        else:
+            moving_avg_train_opt_gap = 0.9 * moving_avg_train_opt_gap + 0.1 * _train_opt_gap
 
         if (irun % val_every == 0) and (irun > 0):
+            val_opt_gap = run_eval_loop(agent, env_val, episodes=30)
             agent.save(
                 f'{model_root}'
                 f'/model-{irun:05d}-'
-                f'val-{np.mean(avg_train_opt_gaps[-val_every:]):.3f}.ckpt')
+                f'val-{val_opt_gap:.3f}.ckpt')
 
         desc = f"" \
                f"train opt gap = {np.mean(avg_train_opt_gaps[-val_every:]):.3f}  " \
@@ -314,7 +378,6 @@ if __name__ == "__main__":
         # use for initial pre-train only
         'entropy_bonus': 0.002,
         'gamma': 0.99,
-        'best_cost_eta': 0.5,
         # architecture settings
         'model': {
             "node_dim": 2,
@@ -344,12 +407,13 @@ if __name__ == "__main__":
         'num_instance_per_batch': 1,
         'reward_mode': VRPReward.FINAL_COST,
         'initializer': VRPInitTour.SINGLETON,
-        'val_every': 500,
+        'val_every': 50,
         'start_run': 0,
         'train_runs': 2000,
         'agent_config': agent_config,
         'model_root': args.modelroot,
-        'data_root': args.dataroot
+        'data_root': args.dataroot,
+        'best_cost_eta': 0.5,
     }
 
     # wandb.init(

@@ -11,8 +11,8 @@ from typing import List, Tuple
 episodes = 10
 hidden_dim = 128
 
-N = 50
-num_steps = 100
+N = 100
+num_steps = 200
 max_tour_demand = VRP_STANDARD_PROBLEM_CONF[N]['capacity']
 
 agent_config = {
@@ -44,41 +44,45 @@ workdir = '/home/ong/personal/deep-ls-tsp'
 
 agent = AverageStateRewardBaselineAgentVRP()
 agent.agent_init(agent_config)
-agent.load(f'{workdir}/model/vrp-50-nodes-lr-2e-6-beta-2e-3-delta-cost-singleton-init-from-ckpt-incremental_improvements/model-04500-val-0.117.ckpt', init_config=False)
+agent.load(f'{workdir}/model/vrp-100-nodes-lr-2e-6-beta-1e-3-delta-cost-singleton-init-from-ckpt-longer-150runs-eta-5e-1/model-05250-val-0.127.ckpt', init_config=False)
 agent.set_eval()
 # agent.set_train()
 
-envs = VRPMultiFileEnvSingleProc(
-    data_f=f'{workdir}/data/vrp-data/size-50/vrp_data_with_results.pkl',
-    num_nodes=N,
-    max_num_steps=num_steps,
-    max_tour_demand=max_tour_demand,
-    num_samples_per_instance=12,
-    num_instance_per_batch=1,
-    reward_mode=VRPReward.DELTA_COST,
-    vectorize_state=True
-)
-# envs = VRPMultiFileEnv(
-#     data_f=f'{workdir}/data/vrp-data/size-50/vrp_data_with_results.pkl',
+# envs = VRPMultiFileEnvSingleProc(
+#     data_f=f'{workdir}/data/vrp-data/size-100/vrp_data_with_results.pkl',
 #     num_nodes=N,
 #     max_num_steps=num_steps,
 #     max_tour_demand=max_tour_demand,
 #     num_samples_per_instance=12,
 #     num_instance_per_batch=1,
 #     reward_mode=VRPReward.DELTA_COST,
-#     vectorize_state=True,
-#     num_proc=3
+#     vectorize_state=True
 # )
+envs = VRPMultiFileEnv(
+    data_f=f'{workdir}/data/vrp-data/size-100/vrp_data_with_results.pkl',
+    num_nodes=N,
+    max_num_steps=num_steps,
+    max_tour_demand=max_tour_demand,
+    num_samples_per_instance=12,
+    num_instance_per_batch=1,
+    reward_mode=VRPReward.DELTA_COST,
+    vectorize_state=True,
+    num_proc=3
+)
 pbar = tqdm(range(episodes))
 opt_gaps = 0.
 
 state_opts_all = []
 best_opts_all = []
+state_cost_all = []
+best_cost_all = []
 
 for episode in pbar:
 
     state_opts = []
     best_opts = []
+    state_cost = []
+    best_cost = []
     step = 0
     # env.set_instance_as_state(instance, id=episode, max_num_steps=num_steps)
     envs.reset(fetch_next=True)
@@ -93,6 +97,8 @@ for episode in pbar:
     # best_opts.append([state[1].get_cost(exclude_depot=False) / opt_cost - 1. for state in states])
     state_opts.append([state.states_cost[0] / opt_cost - 1. for state in states])
     best_opts.append([state.best_states_cost[0] / opt_cost - 1. for state in states])
+    state_cost.append([state.states_cost[0] for state in states])
+    best_cost.append([state.best_states_cost[0] for state in states])
 
     # plot_state(states[0][0], f'{workdir}/dump/episode_{episode:03d}_step_{step:03d}.jpg')
     while True:
@@ -103,6 +109,9 @@ for episode in pbar:
         # best_opts.append([state[1].get_cost(exclude_depot=False) / opt_cost - 1. for state in states])
         state_opts.append([state.states_cost[0] / opt_cost - 1. for state in states])
         best_opts.append([state.best_states_cost[0] / opt_cost - 1. for state in states])
+        state_cost.append([state.states_cost[0] for state in states])
+        best_cost.append([state.best_states_cost[0] for state in states])
+
         done = dones[0]
         if done:
             print(agent.agent_end(rewards))
@@ -116,6 +125,8 @@ for episode in pbar:
 
     state_opts_all.append(state_opts)
     best_opts_all.append(best_opts)
+    state_cost_all.append(state_cost)
+    best_cost_all.append(best_cost)
 
 print(opt_gaps / episodes)
 
@@ -123,6 +134,8 @@ print(opt_gaps / episodes)
 opts_all = {
     'state_opts_all': state_opts_all,
     'best_opts_all': best_opts_all,
+    'state_cost_all': state_cost_all,
+    'best_cost_all': best_cost_all,
 }
-with open("viz_eval_opts_all_beta_2e-3_again.json", "w") as fp:
+with open("viz_eval_opts_all_100_beta_1e-3_longer_eta_5e-1.2.json", "w") as fp:
     json.dump(opts_all, fp)

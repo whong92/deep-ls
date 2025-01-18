@@ -1893,6 +1893,7 @@ class VRPMultiEnvSingleProcAbstract:
             self.cur_instances = instances
             self.cur_instance_ids = instance_ids
 
+
         max_num_steps = max_num_steps if max_num_steps else self.max_num_steps
         assert len(self.cur_instances) == len(self.envs)
         for env, cur_instance, cur_instance_id in zip(self.envs, self.cur_instances, self.cur_instance_ids):
@@ -1906,7 +1907,7 @@ class VRPMultiEnvSingleProcAbstract:
 
     def reset_episode(self):
         for cur_instance_id, env in zip(self.cur_instance_ids, self.envs):
-            assert cur_instance_id, "cannot reset episode before setting a run instance"
+            assert cur_instance_id is not None, "cannot reset episode before setting a run instance"
             env.set_instance_as_state(
                 instance=env.cur_instance,
                 init_tour=env.state.all_tours_as_list(remove_last_depot=True, remove_first_depot=True),
@@ -2056,23 +2057,24 @@ class VRPMultiRandomEnv(VRPMultiEnvAbstract):
 
 
 class VRPMultiFileEnvSingleProc(VRPMultiEnvSingleProcAbstract):
-    def __init__(self, data_f, results_f=None, *args, **kwargs):
+    def __init__(self, data_f, results_f=None, random_seed: int = 33, *args, **kwargs):
         self.data_f = data_f
         self.results_f = results_f
+        self.random_seed = random_seed
         super().__init__(*args, **kwargs)
         self.init()
 
     def init(self):
         with open(self.data_f, 'rb') as fp:
             self.data = pickle.load(fp)
-        random.Random(33).shuffle(self.data)
+        random.Random(self.random_seed).shuffle(self.data)
         self.data_iter = self.data.__iter__()
 
     def get_next_instance(self):
         try:
             instance = next(self.data_iter)
         except StopIteration as e:
-            random.Random(33).shuffle(self.data)
+            random.Random(self.random_seed).shuffle(self.data)
             self.data_iter = self.data.__iter__()
             instance = next(self.data_iter)
 
@@ -2099,23 +2101,24 @@ class VRPMultiFileEnvSingleProc(VRPMultiEnvSingleProcAbstract):
 import pickle
 import random
 class VRPMultiFileEnv(VRPMultiEnvAbstract):
-    def __init__(self, data_f, results_f=None, *args, **kwargs):
+    def __init__(self, data_f, results_f=None, random_seed: int = 33, *args, **kwargs):
         self.data_f = data_f
         self.results_f = results_f
+        self.random_seed = random_seed
         super().__init__(*args, **kwargs)
         self.init()
 
     def init(self):
         with open(self.data_f, 'rb') as fp:
             self.data = pickle.load(fp)
-        random.Random(33).shuffle(self.data)
+        random.Random(self.random_seed).shuffle(self.data)
         self.data_iter = self.data.__iter__()
 
     def get_next_instance(self):
         try:
             instance = next(self.data_iter)
         except StopIteration as e:
-            random.Random(33).shuffle(self.data)
+            random.Random(self.random_seed).shuffle(self.data)
             self.data_iter = self.data.__iter__()
             instance = next(self.data_iter)
 
